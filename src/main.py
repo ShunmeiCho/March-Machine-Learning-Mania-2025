@@ -536,17 +536,36 @@ def main():
         # 生成男子模型的可视化结果
         print("生成男子模型可视化结果...")
         vis_dir = os.path.join(vis_base_dir, 'men')
+        
+        # 确保使用正确的特征列进行预测
+        if m_model_columns and isinstance(m_X_train, np.ndarray):
+            # 创建特征名列表
+            all_features = [f'feature_{i}' for i in range(m_X_train.shape[1])]
+            # 找到m_model_columns中特征在all_features中的索引
+            selected_indices = [all_features.index(col) for col in m_model_columns if col in all_features]
+            # 使用这些索引选择对应的特征
+            m_X_train_filtered = m_X_train[:, selected_indices]
+        else:
+            # 如果不是numpy数组或没有model_columns，直接使用全部特征
+            m_X_train_filtered = m_X_train[m_model_columns] if m_model_columns else m_X_train
+            
+        visualization_prediction_distribution(
+            m_y_train, 
+            m_model.predict_proba(m_X_train_filtered)[:, 1], 
+            title='Men\'s Model Training Set Prediction Distribution',
+            save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
+        )
         visualization_prediction_distribution(
             m_y_val, 
             m_val_preds, 
-            title='Men\'s Model Prediction Distribution (Loaded Model)',
-            save_path=os.path.join(vis_dir, 'pred_distribution_loaded.png')
+            title='Men\'s Model Validation Set Prediction Distribution',
+            save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
         )
         calibration_curve(
             m_y_val, 
             m_val_preds,
-            title='Men\'s Model Calibration Curve (Loaded Model)',
-            save_path=os.path.join(vis_dir, 'calibration_curve_loaded.png')
+            title='Men\'s Model Calibration Curve',
+            save_path=os.path.join(vis_dir, 'calibration_curve.png')
         )
         
         # 评估女子模型
@@ -565,17 +584,36 @@ def main():
         # 生成女子模型的可视化结果
         print("生成女子模型可视化结果...")
         vis_dir = os.path.join(vis_base_dir, 'women')
+        
+        # 确保使用正确的特征列进行预测
+        if w_model_columns and isinstance(w_X_train, np.ndarray):
+            # 创建特征名列表
+            all_features = [f'feature_{i}' for i in range(w_X_train.shape[1])]
+            # 找到w_model_columns中特征在all_features中的索引
+            selected_indices = [all_features.index(col) for col in w_model_columns if col in all_features]
+            # 使用这些索引选择对应的特征
+            w_X_train_filtered = w_X_train[:, selected_indices]
+        else:
+            # 如果不是numpy数组或没有model_columns，直接使用全部特征
+            w_X_train_filtered = w_X_train[w_model_columns] if w_model_columns else w_X_train
+            
+        visualization_prediction_distribution(
+            w_y_train, 
+            w_model.predict_proba(w_X_train_filtered)[:, 1], 
+            title='Women\'s Model Training Set Prediction Distribution',
+            save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
+        )
         visualization_prediction_distribution(
             w_y_val, 
             w_val_preds, 
-            title='Women\'s Model Prediction Distribution (Loaded Model)',
-            save_path=os.path.join(vis_dir, 'pred_distribution_loaded.png')
+            title='Women\'s Model Validation Set Prediction Distribution',
+            save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
         )
         calibration_curve(
             w_y_val, 
             w_val_preds,
-            title='Women\'s Model Calibration Curve (Loaded Model)',
-            save_path=os.path.join(vis_dir, 'calibration_curve_loaded.png')
+            title='Women\'s Model Calibration Curve',
+            save_path=os.path.join(vis_dir, 'calibration_curve.png')
         )
         
     else:
@@ -696,9 +734,22 @@ def main():
         # 生成男子模型的可视化结果
         print("生成男子模型可视化结果...")
         vis_dir = os.path.join(vis_base_dir, 'men')
+        
+        # 确保使用正确的特征列进行预测
+        if m_model_columns and isinstance(m_X_train, np.ndarray):
+            # 创建特征名列表
+            all_features = [f'feature_{i}' for i in range(m_X_train.shape[1])]
+            # 找到m_model_columns中特征在all_features中的索引
+            selected_indices = [all_features.index(col) for col in m_model_columns if col in all_features]
+            # 使用这些索引选择对应的特征
+            m_X_train_filtered = m_X_train[:, selected_indices]
+        else:
+            # 如果不是numpy数组或没有model_columns，直接使用全部特征
+            m_X_train_filtered = m_X_train[m_model_columns] if m_model_columns else m_X_train
+            
         visualization_prediction_distribution(
             m_y_train, 
-            m_model.predict_proba(m_X_train)[:, 1], 
+            m_model.predict_proba(m_X_train_filtered)[:, 1], 
             title='Men\'s Model Training Set Prediction Distribution',
             save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
         )
@@ -731,9 +782,22 @@ def main():
         # 生成女子模型的可视化结果
         print("生成女子模型可视化结果...")
         vis_dir = os.path.join(vis_base_dir, 'women')
+        
+        # 确保使用正确的特征列进行预测
+        if w_model_columns and isinstance(w_X_train, np.ndarray):
+            # 创建特征名列表
+            all_features = [f'feature_{i}' for i in range(w_X_train.shape[1])]
+            # 找到w_model_columns中特征在all_features中的索引
+            selected_indices = [all_features.index(col) for col in w_model_columns if col in all_features]
+            # 使用这些索引选择对应的特征
+            w_X_train_filtered = w_X_train[:, selected_indices]
+        else:
+            # 如果不是numpy数组或没有model_columns，直接使用全部特征
+            w_X_train_filtered = w_X_train[w_model_columns] if w_model_columns else w_X_train
+            
         visualization_prediction_distribution(
             w_y_train, 
-            w_model.predict_proba(w_X_train)[:, 1], 
+            w_model.predict_proba(w_X_train_filtered)[:, 1], 
             title='Women\'s Model Training Set Prediction Distribution',
             save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
         )
