@@ -501,20 +501,50 @@ def main():
             # 检查m_X_val的类型并相应地选择列
             if isinstance(m_X_val, np.ndarray):
                 all_features = [f'feature_{i}' for i in range(m_X_val.shape[1])]
-                selected_indices = [all_features.index(col) for col in m_model_columns if col in all_features]
-                m_X_val = m_X_val[:, selected_indices]
+                selected_indices = []
+                for col in m_model_columns:
+                    try:
+                        if col in all_features:
+                            selected_indices.append(all_features.index(col))
+                    except ValueError:
+                        print(f"警告: 特征 '{col}' 在训练数据中未找到，将被忽略")
+                
+                if selected_indices:
+                    m_X_val = m_X_val[:, selected_indices]
+                else:
+                    print("警告: 没有匹配的特征列，使用全部特征")
             else:
-                m_X_val = m_X_val[m_model_columns]
+                # 确保只使用存在于数据中的列
+                existing_cols = [col for col in m_model_columns if col in m_X_val.columns]
+                if existing_cols:
+                    m_X_val = m_X_val[existing_cols]
+                else:
+                    print("警告: 没有匹配的特征列，使用全部特征")
         
         if w_model_columns:
             # 检查w_X_val的类型并相应地选择列
             if isinstance(w_X_val, np.ndarray):
                 all_features = [f'feature_{i}' for i in range(w_X_val.shape[1])]
-                selected_indices = [all_features.index(col) for col in w_model_columns if col in all_features]
-                w_X_val = w_X_val[:, selected_indices]
+                selected_indices = []
+                for col in w_model_columns:
+                    try:
+                        if col in all_features:
+                            selected_indices.append(all_features.index(col))
+                    except ValueError:
+                        print(f"警告: 特征 '{col}' 在训练数据中未找到，将被忽略")
+                
+                if selected_indices:
+                    w_X_val = w_X_val[:, selected_indices]
+                else:
+                    print("警告: 没有匹配的特征列，使用全部特征")
             else:
-                w_X_val = w_X_val[w_model_columns]
-            
+                # 确保只使用存在于数据中的列
+                existing_cols = [col for col in w_model_columns if col in w_X_val.columns]
+                if existing_cols:
+                    w_X_val = w_X_val[existing_cols]
+                else:
+                    print("警告: 没有匹配的特征列，使用全部特征")
+        
         m_val_preds = m_model.predict_proba(m_X_val)[:, 1]
         w_val_preds = w_model.predict_proba(w_X_val)[:, 1]
         
@@ -540,31 +570,37 @@ def main():
             # 创建特征名列表
             all_features = [f'feature_{i}' for i in range(m_X_train.shape[1])]
             # 找到m_model_columns中特征在all_features中的索引
-            selected_indices = [all_features.index(col) for col in m_model_columns if col in all_features]
-            # 使用这些索引选择对应的特征
-            m_X_train_filtered = m_X_train[:, selected_indices]
-        else:
-            # 如果不是numpy数组或没有model_columns，直接使用全部特征
-            m_X_train_filtered = m_X_train[m_model_columns] if m_model_columns else m_X_train
+            selected_indices = []
+            for col in m_model_columns:
+                try:
+                    if col in all_features:
+                        selected_indices.append(all_features.index(col))
+                except ValueError:
+                    print(f"警告: 特征 '{col}' 在训练数据中未找到，将被忽略")
             
-        visualization_prediction_distribution(
-            m_y_train, 
-            m_model.predict_proba(m_X_train_filtered)[:, 1], 
-            title='Men\'s Model Training Set Prediction Distribution',
-            save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
-        )
-        visualization_prediction_distribution(
-            m_y_val, 
-            m_val_preds, 
-            title='Men\'s Model Validation Set Prediction Distribution',
-            save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
-        )
-        calibration_curve(
-            m_y_val, 
-            m_val_preds,
-            title='Men\'s Model Calibration Curve',
-            save_path=os.path.join(vis_dir, 'calibration_curve.png')
-        )
+            if selected_indices:
+                m_X_train_filtered = m_X_train[:, selected_indices]
+            else:
+                print("警告: 没有匹配的特征列，使用全部特征")
+            
+            visualization_prediction_distribution(
+                m_y_train, 
+                m_model.predict_proba(m_X_train_filtered)[:, 1], 
+                title='Men\'s Model Training Set Prediction Distribution',
+                save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
+            )
+            visualization_prediction_distribution(
+                m_y_val, 
+                m_val_preds, 
+                title='Men\'s Model Validation Set Prediction Distribution',
+                save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
+            )
+            calibration_curve(
+                m_y_val, 
+                m_val_preds,
+                title='Men\'s Model Calibration Curve',
+                save_path=os.path.join(vis_dir, 'calibration_curve.png')
+            )
         
         # 评估女子模型
         w_eval_results = evaluate_predictions(w_y_val, w_val_preds)
@@ -588,31 +624,37 @@ def main():
             # 创建特征名列表
             all_features = [f'feature_{i}' for i in range(w_X_train.shape[1])]
             # 找到w_model_columns中特征在all_features中的索引
-            selected_indices = [all_features.index(col) for col in w_model_columns if col in all_features]
-            # 使用这些索引选择对应的特征
-            w_X_train_filtered = w_X_train[:, selected_indices]
-        else:
-            # 如果不是numpy数组或没有model_columns，直接使用全部特征
-            w_X_train_filtered = w_X_train[w_model_columns] if w_model_columns else w_X_train
+            selected_indices = []
+            for col in w_model_columns:
+                try:
+                    if col in all_features:
+                        selected_indices.append(all_features.index(col))
+                except ValueError:
+                    print(f"警告: 特征 '{col}' 在训练数据中未找到，将被忽略")
             
-        visualization_prediction_distribution(
-            w_y_train, 
-            w_model.predict_proba(w_X_train_filtered)[:, 1], 
-            title='Women\'s Model Training Set Prediction Distribution',
-            save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
-        )
-        visualization_prediction_distribution(
-            w_y_val, 
-            w_val_preds, 
-            title='Women\'s Model Validation Set Prediction Distribution',
-            save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
-        )
-        calibration_curve(
-            w_y_val, 
-            w_val_preds,
-            title='Women\'s Model Calibration Curve',
-            save_path=os.path.join(vis_dir, 'calibration_curve.png')
-        )
+            if selected_indices:
+                w_X_train_filtered = w_X_train[:, selected_indices]
+            else:
+                print("警告: 没有匹配的特征列，使用全部特征")
+            
+            visualization_prediction_distribution(
+                w_y_train, 
+                w_model.predict_proba(w_X_train_filtered)[:, 1], 
+                title='Women\'s Model Training Set Prediction Distribution',
+                save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
+            )
+            visualization_prediction_distribution(
+                w_y_val, 
+                w_val_preds, 
+                title='Women\'s Model Validation Set Prediction Distribution',
+                save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
+            )
+            calibration_curve(
+                w_y_val, 
+                w_val_preds,
+                title='Women\'s Model Calibration Curve',
+                save_path=os.path.join(vis_dir, 'calibration_curve.png')
+            )
         
     else:
         print("训练新模型...")
@@ -699,20 +741,50 @@ def main():
             # 检查m_X_val的类型并相应地选择列
             if isinstance(m_X_val, np.ndarray):
                 all_features = [f'feature_{i}' for i in range(m_X_val.shape[1])]
-                selected_indices = [all_features.index(col) for col in m_model_columns if col in all_features]
-                m_X_val = m_X_val[:, selected_indices]
+                selected_indices = []
+                for col in m_model_columns:
+                    try:
+                        if col in all_features:
+                            selected_indices.append(all_features.index(col))
+                    except ValueError:
+                        print(f"警告: 特征 '{col}' 在训练数据中未找到，将被忽略")
+                
+                if selected_indices:
+                    m_X_val = m_X_val[:, selected_indices]
+                else:
+                    print("警告: 没有匹配的特征列，使用全部特征")
             else:
-                m_X_val = m_X_val[m_model_columns]
+                # 确保只使用存在于数据中的列
+                existing_cols = [col for col in m_model_columns if col in m_X_val.columns]
+                if existing_cols:
+                    m_X_val = m_X_val[existing_cols]
+                else:
+                    print("警告: 没有匹配的特征列，使用全部特征")
         
         if w_model_columns:
             # 检查w_X_val的类型并相应地选择列
             if isinstance(w_X_val, np.ndarray):
                 all_features = [f'feature_{i}' for i in range(w_X_val.shape[1])]
-                selected_indices = [all_features.index(col) for col in w_model_columns if col in all_features]
-                w_X_val = w_X_val[:, selected_indices]
+                selected_indices = []
+                for col in w_model_columns:
+                    try:
+                        if col in all_features:
+                            selected_indices.append(all_features.index(col))
+                    except ValueError:
+                        print(f"警告: 特征 '{col}' 在训练数据中未找到，将被忽略")
+                
+                if selected_indices:
+                    w_X_val = w_X_val[:, selected_indices]
+                else:
+                    print("警告: 没有匹配的特征列，使用全部特征")
             else:
-                w_X_val = w_X_val[w_model_columns]
-            
+                # 确保只使用存在于数据中的列
+                existing_cols = [col for col in w_model_columns if col in w_X_val.columns]
+                if existing_cols:
+                    w_X_val = w_X_val[existing_cols]
+                else:
+                    print("警告: 没有匹配的特征列，使用全部特征")
+        
         m_val_preds = m_model.predict_proba(m_X_val)[:, 1]
         w_val_preds = w_model.predict_proba(w_X_val)[:, 1]
         
@@ -738,31 +810,37 @@ def main():
             # 创建特征名列表
             all_features = [f'feature_{i}' for i in range(m_X_train.shape[1])]
             # 找到m_model_columns中特征在all_features中的索引
-            selected_indices = [all_features.index(col) for col in m_model_columns if col in all_features]
-            # 使用这些索引选择对应的特征
-            m_X_train_filtered = m_X_train[:, selected_indices]
-        else:
-            # 如果不是numpy数组或没有model_columns，直接使用全部特征
-            m_X_train_filtered = m_X_train[m_model_columns] if m_model_columns else m_X_train
+            selected_indices = []
+            for col in m_model_columns:
+                try:
+                    if col in all_features:
+                        selected_indices.append(all_features.index(col))
+                except ValueError:
+                    print(f"警告: 特征 '{col}' 在训练数据中未找到，将被忽略")
             
-        visualization_prediction_distribution(
-            m_y_train, 
-            m_model.predict_proba(m_X_train_filtered)[:, 1], 
-            title='Men\'s Model Training Set Prediction Distribution',
-            save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
-        )
-        visualization_prediction_distribution(
-            m_y_val, 
-            m_val_preds, 
-            title='Men\'s Model Validation Set Prediction Distribution',
-            save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
-        )
-        calibration_curve(
-            m_y_val, 
-            m_val_preds,
-            title='Men\'s Model Calibration Curve',
-            save_path=os.path.join(vis_dir, 'calibration_curve.png')
-        )
+            if selected_indices:
+                m_X_train_filtered = m_X_train[:, selected_indices]
+            else:
+                print("警告: 没有匹配的特征列，使用全部特征")
+            
+            visualization_prediction_distribution(
+                m_y_train, 
+                m_model.predict_proba(m_X_train_filtered)[:, 1], 
+                title='Men\'s Model Training Set Prediction Distribution',
+                save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
+            )
+            visualization_prediction_distribution(
+                m_y_val, 
+                m_val_preds, 
+                title='Men\'s Model Validation Set Prediction Distribution',
+                save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
+            )
+            calibration_curve(
+                m_y_val, 
+                m_val_preds,
+                title='Men\'s Model Calibration Curve',
+                save_path=os.path.join(vis_dir, 'calibration_curve.png')
+            )
         
         # 评估女子模型
         w_eval_results = evaluate_predictions(w_y_val, w_val_preds)
@@ -786,31 +864,37 @@ def main():
             # 创建特征名列表
             all_features = [f'feature_{i}' for i in range(w_X_train.shape[1])]
             # 找到w_model_columns中特征在all_features中的索引
-            selected_indices = [all_features.index(col) for col in w_model_columns if col in all_features]
-            # 使用这些索引选择对应的特征
-            w_X_train_filtered = w_X_train[:, selected_indices]
-        else:
-            # 如果不是numpy数组或没有model_columns，直接使用全部特征
-            w_X_train_filtered = w_X_train[w_model_columns] if w_model_columns else w_X_train
+            selected_indices = []
+            for col in w_model_columns:
+                try:
+                    if col in all_features:
+                        selected_indices.append(all_features.index(col))
+                except ValueError:
+                    print(f"警告: 特征 '{col}' 在训练数据中未找到，将被忽略")
             
-        visualization_prediction_distribution(
-            w_y_train, 
-            w_model.predict_proba(w_X_train_filtered)[:, 1], 
-            title='Women\'s Model Training Set Prediction Distribution',
-            save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
-        )
-        visualization_prediction_distribution(
-            w_y_val, 
-            w_val_preds, 
-            title='Women\'s Model Validation Set Prediction Distribution',
-            save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
-        )
-        calibration_curve(
-            w_y_val, 
-            w_val_preds,
-            title='Women\'s Model Calibration Curve',
-            save_path=os.path.join(vis_dir, 'calibration_curve.png')
-        )
+            if selected_indices:
+                w_X_train_filtered = w_X_train[:, selected_indices]
+            else:
+                print("警告: 没有匹配的特征列，使用全部特征")
+            
+            visualization_prediction_distribution(
+                w_y_train, 
+                w_model.predict_proba(w_X_train_filtered)[:, 1], 
+                title='Women\'s Model Training Set Prediction Distribution',
+                save_path=os.path.join(vis_dir, 'train_pred_distribution.png')
+            )
+            visualization_prediction_distribution(
+                w_y_val, 
+                w_val_preds, 
+                title='Women\'s Model Validation Set Prediction Distribution',
+                save_path=os.path.join(vis_dir, 'val_pred_distribution.png')
+            )
+            calibration_curve(
+                w_y_val, 
+                w_val_preds,
+                title='Women\'s Model Calibration Curve',
+                save_path=os.path.join(vis_dir, 'calibration_curve.png')
+            )
     
     # === 生成所有可能对阵的预测 ===
     if args.generate_predictions:

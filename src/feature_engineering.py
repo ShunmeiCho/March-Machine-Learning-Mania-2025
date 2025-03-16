@@ -51,18 +51,28 @@ def calculate_team_stats(regular_season, regular_detail, start_year, end_year):
     """
     team_stats = {}
     
-    # 预先过滤赛季数据以提高性能
-    # Pre-filter season data for better performance
-    regular_season_filtered = regular_season[(regular_season['Season'] >= start_year) & 
-                                           (regular_season['Season'] <= end_year)]
+    # 预先过滤赛季数据
+    regular_season_filtered = regular_season.query(f"Season >= {start_year} and Season <= {end_year}")
     
-    # 如果有详细数据，也预先过滤
-    # Pre-filter detailed data if available
+    # 处理详细数据
     if regular_detail is not None:
-        regular_detail_filtered = regular_detail[(regular_detail['Season'] >= start_year) & 
-                                               (regular_detail['Season'] <= end_year)]
+        regular_detail_filtered = regular_detail.query(f"Season >= {start_year} and Season <= {end_year}")
     else:
         regular_detail_filtered = None
+    
+    # 使用每个赛季的唯一队伍ID进行预处理
+    all_season_team_ids = set()
+    for season in range(start_year, end_year + 1):
+        season_data = regular_season_filtered[regular_season_filtered['Season'] == season]
+        season_team_ids = set(season_data['WTeamID'].unique()) | set(season_data['LTeamID'].unique())
+        all_season_team_ids.update(season_team_ids)
+    
+    # 预先分配内存
+    columns = ['num_wins', 'total_games', 'points_scored', 'points_allowed', 
+              'num_losses', 'win_rate', 'avg_points_scored', 'avg_points_allowed', 
+              'point_diff', 'home_wins', 'home_games', 'home_win_rate',
+              'away_wins', 'away_games', 'away_win_rate', 'recent_win_rate', 
+              'momentum', 'season_rank', 'normalized_rank']
     
     for season in range(start_year, end_year + 1):
         season_data = regular_season_filtered[regular_season_filtered['Season'] == season]
@@ -132,115 +142,26 @@ def calculate_team_stats(regular_season, regular_detail, start_year, end_year):
             'away_games': 0
         })
         
-        # 转换为字典以保持与原始代码兼容的输出格式
-        # Convert to dictionary to maintain output format compatible with original code
-        teams_season_stats = team_season_stats.to_dict('index')
+        # 转换为字典前减少内存使用
+        # 使用浮点精度降低
+        float_cols = ['win_rate', 'avg_points_scored', 'avg_points_allowed', 
+                     'point_diff', 'home_win_rate', 'away_win_rate', 
+                     'recent_win_rate', 'momentum', 'normalized_rank']
         
-        # 处理详细数据（如果可用）
-        # Process detailed data if available
-        if regular_detail_filtered is not None:
-            season_detail = regular_detail_filtered[regular_detail_filtered['Season'] == season]
-            
-            if not season_detail.empty and 'WFGM' in season_detail.columns:
-                # 创建胜负详细数据框
-                # Create win/loss detailed dataframes
-                wins_detail = season_detail[season_detail['WTeamID'].isin(team_season_stats.index)]
-                losses_detail = season_detail[season_detail['LTeamID'].isin(team_season_stats.index)]
+        for col in float_cols:
+            if col in team_season_stats:
+                team_season_stats[col] = team_season_stats[col].astype('float32')
+        
+        # 使用最优的整数类型
+        int_cols = ['num_wins', 'total_games', 'home_wins', 'home_games', 
+                   'away_wins', 'away_games', 'season_rank']
+        
+        for col in int_cols:
+            if col in team_season_stats:
+                team_season_stats[col] = team_season_stats[col].astype('int32')
                 
-                # 对每支队伍处理详细统计数据（现在使用更高效的向量化操作）
-                # Process detailed stats for each team (now using more efficient vectorized operations)
-                for team in teams_season_stats:
-                    w_detail = wins_detail[wins_detail['WTeamID'] == team]
-                    l_detail = losses_detail[losses_detail['LTeamID'] == team]
-                    
-                    total_detail_games = len(w_detail) + len(l_detail)
-                    
-                    if total_detail_games > 0:
-                        # 使用sum()和更简洁的代码计算统计数据
-                        # Calculate statistics using sum() and more concise code
-                        # 投篮命中率统计
-                        # Field goal statistics
-                        w_fgm = w_detail['WFGM'].sum() if not w_detail.empty else 0
-                        w_fga = w_detail['WFGA'].sum() if not w_detail.empty else 0
-                        l_fgm = l_detail['LFGM'].sum() if not l_detail.empty else 0
-                        l_fga = l_detail['LFGA'].sum() if not l_detail.empty else 0
-                        
-                        total_fgm = w_fgm + l_fgm
-                        total_fga = w_fga + l_fga
-                        fg_pct = total_fgm / total_fga if total_fga > 0 else 0
-                        
-                        # 三分球统计
-                        # Three-point statistics
-                        w_fgm3 = w_detail['WFGM3'].sum() if not w_detail.empty else 0
-                        w_fga3 = w_detail['WFGA3'].sum() if not w_detail.empty else 0
-                        l_fgm3 = l_detail['LFGM3'].sum() if not l_detail.empty else 0
-                        l_fga3 = l_detail['LFGA3'].sum() if not l_detail.empty else 0
-                        
-                        total_fgm3 = w_fgm3 + l_fgm3
-                        total_fga3 = w_fga3 + l_fga3
-                        fg3_pct = total_fgm3 / total_fga3 if total_fga3 > 0 else 0
-                        
-                        # 剩余统计数据 (简洁版)
-                        # Remaining statistics (concise version)
-                        stats_mapping = {
-                            'FTM': 'FT', 'FTA': 'FT', 
-                            'OR': 'OR', 'DR': 'DR',
-                            'Ast': 'Ast', 'TO': 'TO', 
-                            'Stl': 'Stl', 'Blk': 'Blk'
-                        }
-                        
-                        advanced_stats = {}
-                        for stat, prefix in stats_mapping.items():
-                            w_stat = w_detail[f'W{stat}'].sum() if not w_detail.empty else 0
-                            l_stat = l_detail[f'L{stat}'].sum() if not l_detail.empty else 0
-                            total_stat = w_stat + l_stat
-                            advanced_stats[f'total_{prefix.lower()}'] = total_stat
-                            advanced_stats[f'avg_{prefix.lower()}'] = total_stat / total_detail_games
-                        
-                        # 计算百分比和比率
-                        # Calculate percentages and ratios
-                        advanced_stats['ft_pct'] = advanced_stats['total_ft'] / advanced_stats['total_ft'] if advanced_stats['total_ft'] > 0 else 0
-                        advanced_stats['ast_to_ratio'] = advanced_stats['avg_ast'] / advanced_stats['avg_to'] if advanced_stats['avg_to'] > 0 else 0
-                        
-                        # 更新队伍统计数据
-                        # Update team statistics
-                        teams_season_stats[team].update({
-                            'fg_pct': fg_pct,
-                            'fg3_pct': fg3_pct,
-                            **{k: v for k, v in advanced_stats.items() if k not in ['total_ft', 'total_ft']}
-                        })
-        
-        # 计算动量特征（近期表现）
-        # Calculate momentum features (recent performance)
-        for team in teams_season_stats:
-            # 按日期排序获取最近10场比赛
-            # Sort by date to get last 10 games
-            team_games = all_games[all_games['TeamID'] == team].sort_values('DayNum', ascending=False).head(10)
-            
-            # 计算最近10场比赛的胜率
-            # Calculate win rate in last 10 games
-            recent_win_rate = team_games['Win'].mean() if not team_games.empty else teams_season_stats[team]['win_rate']
-            
-            # 添加动量特征
-            # Add momentum features
-            teams_season_stats[team]['recent_win_rate'] = recent_win_rate
-            teams_season_stats[team]['momentum'] = recent_win_rate - teams_season_stats[team]['win_rate']
-        
-        # 计算全局排名 (使用vectorized操作)
-        # Calculate global ranking (using vectorized operations)
-        point_diffs = {team: stats['point_diff'] for team, stats in teams_season_stats.items()}
-        sorted_teams = sorted(point_diffs.items(), key=lambda x: x[1], reverse=True)
-        ranking_dict = {team: rank+1 for rank, (team, _) in enumerate(sorted_teams)}
-        num_teams = len(ranking_dict)
-        
-        # 添加排名到统计数据
-        # Add ranking to statistics
-        for team in teams_season_stats:
-            teams_season_stats[team]['season_rank'] = ranking_dict.get(team, num_teams)
-            teams_season_stats[team]['normalized_rank'] = teams_season_stats[team]['season_rank'] / num_teams
-        
-        # 存储本赛季的统计数据
-        # Store this season's statistics
+        # 转换为字典
+        teams_season_stats = team_season_stats.to_dict('index')
         team_stats[season] = teams_season_stats
     
     return team_stats

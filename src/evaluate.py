@@ -20,7 +20,7 @@ from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score, accuracy_
 from typing import Dict, Optional, Tuple, Union, List, Any
 import cupy as cp
 from contextlib import contextmanager
-from utils import gpu_context, to_gpu
+from utils import gpu_context, to_gpu, to_cpu
 
 
 def apply_brier_optimal_strategy(predictions_df: pd.DataFrame, 
@@ -64,30 +64,21 @@ def apply_brier_optimal_strategy(predictions_df: pd.DataFrame,
     # 金牌解决方案证明：理论上，对于胜率为33.3%的比赛采取风险策略是最优的
     # 函数f(p) = p(1-p)^2的最大值出现在p=1/3处
     
-    # Create a view with only the predictions column to avoid copying the entire dataframe
-    # 仅创建预测列的视图以避免复制整个数据框
-    pred_series = predictions_df['Pred']
-    
-    # Calculate mask for risky predictions
-    # 计算风险预测的掩码
-    risky_mask = (pred_series >= lower_bound) & (pred_series <= upper_bound)
-    risky_count = np.sum(risky_mask)
+    # 创建掩码而不是Series视图
+    risky_mask = (predictions_df['Pred'] >= lower_bound) & (predictions_df['Pred'] <= upper_bound)
+    risky_count = risky_mask.sum()
     
     if risky_count > 0:
-        # Only copy the dataframe if we actually need to modify it
-        # 仅在需要修改时才复制数据框
+        # 只复制需要修改的部分
         predictions_copy = predictions_df.copy()
         
-        # Apply adjustment using vectorized operations
-        # 使用向量化操作应用调整
-        risky_indices = risky_mask[risky_mask].index
+        # 直接使用布尔索引修改
+        risky_indices = predictions_copy.index[risky_mask]
         current_preds = predictions_copy.loc[risky_indices, 'Pred']
         predictions_copy.loc[risky_indices, 'Pred'] = 0.5 + (current_preds - lower_bound) * adjustment_factor
         
-        # Generate strategy application report
-        # 生成策略应用报告
+        # 生成报告
         total_predictions = len(predictions_copy)
-        
         print(f"Applying optimal risk strategy:")
         print(f"  - Total predictions: {total_predictions}")
         print(f"  - Predictions with risk strategy applied: {risky_count} ({risky_count/total_predictions*100:.2f}%)")
@@ -95,63 +86,102 @@ def apply_brier_optimal_strategy(predictions_df: pd.DataFrame,
         
         return predictions_copy
     else:
-        # If no risky predictions, return the original dataframe without copying
-        # 如果没有风险预测，则返回原始数据框而不进行复制
+        # 没有修改时返回原始数据
         print("No predictions in the risk range - no adjustments applied")
         return predictions_df
 
 
 def evaluate_predictions(y_true, y_pred, confidence_thresholds=(0.3, 0.7),
                        gender=None, use_gpu=True):
-    """Evaluate predictions with GPU support"""
+    """评估预测结果，支持GPU加速"""
     with gpu_context(use_gpu) as gpu_available:
         if gpu_available:
             try:
-                # 批量转换数据到GPU
+                # 将数据转移到GPU
                 y_true_gpu = to_gpu(y_true)
                 y_pred_gpu = to_gpu(y_pred)
                 
-                # GPU计算评估指标
+                # 计算评估指标
                 metrics = {}
                 
-                # Brier分数计算
+                # Brier分数
                 metrics['brier_score'] = float(cp.mean((y_pred_gpu - y_true_gpu) ** 2))
                 
-                # ROC AUC计算
-                # 注意：这里需要自定义GPU版本的ROC AUC计算
-                def gpu_roc_auc(y_true, y_pred):
-                    # 排序预测值
-                    sort_idx = cp.argsort(y_pred)[::-1]
-                    y_true = y_true[sort_idx]
-                    
-                    # 计算TPR和FPR
-                    tpr = cp.cumsum(y_true) / cp.sum(y_true)
-                    fpr = cp.cumsum(1 - y_true) / cp.sum(1 - y_true)
-                    
-                    # 计算AUC
-                    return float(cp.trapz(tpr, fpr))
-                
-                metrics['roc_auc'] = gpu_roc_auc(y_true_gpu, y_pred_gpu)
-                
-                # 对数损失计算
+                # 对数损失
                 epsilon = 1e-15
-                y_pred_gpu = cp.clip(y_pred_gpu, epsilon, 1 - epsilon)
+                y_pred_clipped = cp.clip(y_pred_gpu, epsilon, 1 - epsilon)
                 metrics['log_loss'] = float(-cp.mean(
-                    y_true_gpu * cp.log(y_pred_gpu) + 
-                    (1 - y_true_gpu) * cp.log(1 - y_pred_gpu)
+                    y_true_gpu * cp.log(y_pred_clipped) + 
+                    (1 - y_true_gpu) * cp.log(1 - y_pred_clipped)
                 ))
                 
-                # 清理GPU内存
-                del y_true_gpu, y_pred_gpu
-                cp.get_default_memory_pool().free_all_blocks()
+                try:
+                    # 尝试使用更稳定的GPU ROC AUC实现
+                    # 排序预测值
+                    sort_indices = cp.argsort(y_pred_gpu)[::-1]
+                    sorted_y_true = y_true_gpu[sort_indices]
+                    sorted_y_pred = y_pred_gpu[sort_indices]
+                    
+                    # 去除重复的预测值，以避免计算错误
+                    unique_pred_values, unique_indices = cp.unique(sorted_y_pred, return_index=True)
+                    
+                    if len(unique_pred_values) > 1:
+                        # 计算TPR和FPR
+                        n_pos = cp.sum(y_true_gpu)
+                        n_neg = len(y_true_gpu) - n_pos
+                        
+                        if n_pos > 0 and n_neg > 0:
+                            # 计算累积TPR和FPR
+                            tpr = cp.zeros(len(unique_indices) + 1)
+                            fpr = cp.zeros(len(unique_indices) + 1)
+                            
+                            for i, idx in enumerate(unique_indices):
+                                tpr[i+1] = cp.sum(sorted_y_true[:idx+1]) / n_pos
+                                fpr[i+1] = cp.sum(1 - sorted_y_true[:idx+1]) / n_neg
+                            
+                            # 计算AUC
+                            metrics['roc_auc'] = float(cp.sum((fpr[1:] - fpr[:-1]) * (tpr[1:] + tpr[:-1])) / 2)
+                        else:
+                            # 正例或负例为0，AUC无意义
+                            metrics['roc_auc'] = 0.5
+                    else:
+                        # 所有预测值相同，AUC无意义
+                        metrics['roc_auc'] = 0.5
+                except Exception as e:
+                    print(f"GPU ROC AUC计算失败: {e}，使用sklearn计算")
+                    # 退回到CPU计算
+                    y_true_cpu = to_cpu(y_true_gpu)
+                    y_pred_cpu = to_cpu(y_pred_gpu)
+                    from sklearn.metrics import roc_auc_score
+                    metrics['roc_auc'] = roc_auc_score(y_true_cpu, y_pred_cpu)
                 
                 return metrics
             except Exception as e:
                 print(f"GPU评估失败: {e}")
                 use_gpu = False
+            finally:
+                # 确保释放GPU内存
+                cp.get_default_memory_pool().free_all_blocks()
     
     # 如果GPU不可用或失败，使用CPU评估
     # ... 原有的CPU评估代码 ...
+    
+    # 需要添加完整的CPU实现:
+    metrics = {}
+    
+    # Brier分数
+    from sklearn.metrics import brier_score_loss
+    metrics['brier_score'] = brier_score_loss(y_true, y_pred)
+    
+    # 对数损失
+    from sklearn.metrics import log_loss
+    metrics['log_loss'] = log_loss(y_true, y_pred)
+    
+    # ROC AUC
+    from sklearn.metrics import roc_auc_score
+    metrics['roc_auc'] = roc_auc_score(y_true, y_pred)
+    
+    return metrics
 
 
 def visualization_prediction_distribution(y_pred: Union[List, np.ndarray], 

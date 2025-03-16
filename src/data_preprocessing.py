@@ -23,6 +23,8 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 from utils import gpu_context, to_gpu, to_cpu
 import cupy as cp
+import bisect
+from sklearn.model_selection import train_test_split
 
 
 def load_data(data_path, use_cache=True, cache_dir=None):
@@ -228,38 +230,14 @@ def estimate_round_number(day_num):
     """
     根据比赛日期估计锦标赛轮次
     Estimate tournament round based on game date (DayNum)
-    
-    NCAA锦标赛通常遵循以下时间表:
-    The NCAA tournament typically follows this schedule:
-    - 第1轮: First Four/Play-in (日期<136)
-    - 第2轮: First Round/Round of 64 (日期136-137)
-    - 第3轮: Second Round/Round of 32 (日期138-142)
-    - 第4轮: Sweet 16 (日期143-144)
-    - 第5轮: Elite 8 (日期145-149)
-    - 第6轮: Final Four and Championship (日期>=150)
-    
-    参数 Parameters:
-        day_num (int): 比赛日期编号
-                       Game date number
-    
-    返回 Returns:
-        int: 估计的锦标赛轮次 (1-6)
-             Estimated tournament round (1-6)
     """
-    # 使用高效的条件判断估计轮次
-    # Use efficient conditional logic to estimate round
-    if day_num < 136:
-        return 1
-    elif day_num < 138:
-        return 2
-    elif day_num < 143:
-        return 3
-    elif day_num < 145:
-        return 4
-    elif day_num < 150:
-        return 5
-    else:
-        return 6
+    # 定义轮次边界
+    boundaries = [0, 136, 138, 143, 145, 150, float('inf')]
+    rounds = [1, 2, 3, 4, 5, 6]
+    
+    # 使用二分查找确定日期所在的轮次区间
+    idx = bisect.bisect_right(boundaries, day_num) - 1
+    return rounds[idx]
 
 
 def create_tourney_train_data(tourney_results, start_year, end_year):
@@ -280,67 +258,83 @@ def create_tourney_train_data(tourney_results, start_year, end_year):
                       Processed training data
     """
     # 使用query方法高效过滤数据
-    # Use query method to filter data efficiently
     filtered_results = tourney_results.query(f"Season >= {start_year} and Season <= {end_year}").copy()
     
     # 创建临时列用于向量化操作
-    # Create temporary columns for vectorized operations
     filtered_results.loc[:, 'Team1'] = filtered_results[['WTeamID', 'LTeamID']].min(axis=1)
     filtered_results.loc[:, 'Team2'] = filtered_results[['WTeamID', 'LTeamID']].max(axis=1)
     filtered_results.loc[:, 'Team1_Win'] = (filtered_results['WTeamID'] == filtered_results['Team1']).astype(int)
     
     # 向量化估计比赛轮次
-    # Vectorized estimation of game rounds
-    filtered_results.loc[:, 'Round'] = filtered_results['DayNum'].apply(estimate_round_number)
+    filtered_results['Round'] = filtered_results['DayNum'].apply(estimate_round_number)
     
     # 选择必要的列返回
-    # Select necessary columns to return
     tourney_train_data = filtered_results[['Season', 'Team1', 'Team2', 'Team1_Win', 'Round', 'DayNum']]
     
     return tourney_train_data
 
 
 def prepare_train_val_data_time_aware(X, y, tourney_train, test_size=0.2, 
-                                    random_state=42, use_gpu=True):
+                                     random_state=42, use_gpu=True):
     """Prepare train/val data with GPU support"""
     with gpu_context(use_gpu) as gpu_available:
         if gpu_available:
             try:
                 # 批量转换数据到GPU以提高效率
                 batch_size = int(1e6)  # 设置合适的批量大小
+                X_batches, y_batches = [], []
                 
-                # 分批转换X
-                X_batches = []
-                for i in range(0, len(X), batch_size):
-                    batch = to_gpu(X[i:i+batch_size])
-                    X_batches.append(batch)
-                X_gpu = cp.concatenate(X_batches) if len(X_batches) > 1 else X_batches[0]
+                try:
+                    # 分批转换X
+                    for i in range(0, len(X), batch_size):
+                        batch = to_gpu(X[i:i+batch_size])
+                        X_batches.append(batch)
+                    X_gpu = cp.concatenate(X_batches) if len(X_batches) > 1 else X_batches[0]
+                    
+                    # 分批转换y
+                    for i in range(0, len(y), batch_size):
+                        batch = to_gpu(y[i:i+batch_size])
+                        y_batches.append(batch)
+                    y_gpu = cp.concatenate(y_batches) if len(y_batches) > 1 else y_batches[0]
+                    
+                    # GPU上进行数据分割
+                    split_idx = int(len(X_gpu) * (1 - test_size))
+                    X_train = X_gpu[:split_idx]
+                    X_val = X_gpu[split_idx:]
+                    y_train = y_gpu[:split_idx]
+                    y_val = y_gpu[split_idx:]
+                    
+                    result = to_cpu(X_train), to_cpu(X_val), to_cpu(y_train), to_cpu(y_val)
+                finally:
+                    # 确保清理临时GPU内存，不管是否成功
+                    del X_batches, y_batches
+                    if 'X_gpu' in locals(): del X_gpu
+                    if 'y_gpu' in locals(): del y_gpu
+                    cp.get_default_memory_pool().free_all_blocks()
                 
-                # 分批转换y
-                y_batches = []
-                for i in range(0, len(y), batch_size):
-                    batch = to_gpu(y[i:i+batch_size])
-                    y_batches.append(batch)
-                y_gpu = cp.concatenate(y_batches) if len(y_batches) > 1 else y_batches[0]
-                
-                # GPU上进行数据分割
-                split_idx = int(len(X_gpu) * (1 - test_size))
-                X_train = X_gpu[:split_idx]
-                X_val = X_gpu[split_idx:]
-                y_train = y_gpu[:split_idx]
-                y_val = y_gpu[split_idx:]
-                
-                # 清理临时GPU内存
-                del X_batches, y_batches
-                cp.get_default_memory_pool().free_all_blocks()
-                
-                return to_cpu(X_train), to_cpu(X_val), to_cpu(y_train), to_cpu(y_val)
+                return result
             except Exception as e:
                 print(f"GPU处理失败: {e}")
                 use_gpu = False
+                cp.get_default_memory_pool().free_all_blocks()
     
     # 如果GPU不可用或失败，使用CPU处理
-    # ... 原有的CPU处理代码 ...
+    # 确保X和y是numpy数组
+    X_np = np.array(X) if not isinstance(X, np.ndarray) else X
+    y_np = np.array(y) if not isinstance(y, np.ndarray) else y
+    
+    # 获取比赛季节信息，用于分层分割
+    seasons = tourney_train['Season'].values
+    
+    # 进行分层分割，保持每个季节的比例
+    X_train, X_val, y_train, y_val = train_test_split(
+        X_np, y_np, 
+        test_size=test_size, 
+        random_state=random_state,
+        stratify=seasons
+    )
+    
+    return X_train, X_val, y_train, y_val
 
 
 def parallel_feature_extraction(data_dict, n_jobs=-1, verbose=1):

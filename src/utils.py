@@ -49,40 +49,37 @@ def set_random_seed(seed=42, use_gpu=True):
 
 @contextmanager
 def gpu_context(use_gpu=True):
-    """改进的GPU上下文管理器，支持多GPU和内存管理"""
-    if use_gpu:
-        try:
-            # 获取可用GPU数量
-            num_gpus = cp.cuda.runtime.getDeviceCount()
-            if num_gpus == 0:
-                print("未检测到GPU设备，切换到CPU模式")
-                yield False
-                return
-                
-            # 获取GPU内存使用最少的设备
-            free_memory = []
-            for i in range(num_gpus):
-                with cp.cuda.Device(i):
-                    meminfo = cp.cuda.runtime.memGetInfo()
-                    free_memory.append(meminfo[0])
-            
-            optimal_device = free_memory.index(max(free_memory))
-            
-            with cp.cuda.Device(optimal_device):
-                # 清理GPU缓存
-                cp.get_default_memory_pool().free_all_blocks()
-                yield True
-        except Exception as e:
-            print(f"GPU上下文初始化失败: {e}")
-            yield False
-        finally:
+    """更高效和安全的GPU上下文管理器"""
+    gpu_available = False
+    try:
+        if use_gpu:
             try:
-                # 确保清理GPU内存
-                cp.get_default_memory_pool().free_all_blocks()
-            except:
-                pass
-    else:
+                # 检查cupy是否可用
+                import cupy as cp
+                # 检查CUDA设备是否可用
+                num_gpus = cp.cuda.runtime.getDeviceCount()
+                if num_gpus > 0:
+                    gpu_available = True
+                    # 设置当前设备为0
+                    cp.cuda.Device(0).use()
+                    yield True
+                    return
+                else:
+                    print("找不到可用的CUDA设备，将使用CPU进行计算。")
+            except (ImportError, Exception) as e:
+                print(f"初始化GPU失败: {e}")
+                print("将使用CPU进行计算。")
+        
+        # 如果GPU不可用或失败，返回False
         yield False
+    finally:
+        # 无论GPU是否可用，都尝试清理内存
+        if gpu_available:
+            try:
+                # 清理GPU内存
+                cp.get_default_memory_pool().free_all_blocks()
+            except Exception as e:
+                print(f"清理GPU内存时出错: {e}")
 
 
 def to_gpu(data, use_gpu=True):

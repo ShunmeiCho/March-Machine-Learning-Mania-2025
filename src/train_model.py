@@ -418,25 +418,16 @@ def build_xgboost_model(X_train, y_train, X_val, y_val, random_seed=42,
                     free_memory.append(meminfo[0])
             optimal_device = free_memory.index(max(free_memory))
             
-            # 设置当前GPU设备
-            cp.cuda.Device(optimal_device).use()
-            
             # 设置XGBoost GPU参数
-            tree_method = 'gpu_hist'  # 使用GPU直方图方法
+            tree_method = 'hist'  # 更新为新的推荐方式
             predictor = 'gpu_predictor'
-            device = f'cuda:{optimal_device}'
+            device = f'cuda:{optimal_device}'  # 使用新的device参数
             
-            # 确保数据在GPU上
-            if isinstance(X_train, (np.ndarray, pd.DataFrame)):
-                X_train = cp.asarray(X_train)
-            if isinstance(y_train, (np.ndarray, pd.Series)):
-                y_train = cp.asarray(y_train)
-            if isinstance(X_val, (np.ndarray, pd.DataFrame)):
-                X_val = cp.asarray(X_val)
-            if isinstance(y_val, (np.ndarray, pd.Series)):
-                y_val = cp.asarray(y_val)
-                
-            print(f"数据已转移到GPU设备 {device}")
+            # 转换数据到GPU
+            X_train = utils.to_gpu(X_train)
+            y_train = utils.to_gpu(y_train)
+            X_val = utils.to_gpu(X_val)
+            y_val = utils.to_gpu(y_val)
             
         except Exception as e:
             print(f"GPU初始化失败，使用CPU: {e}")
@@ -453,9 +444,9 @@ def build_xgboost_model(X_train, y_train, X_val, y_val, random_seed=42,
     params = {
         'tree_method': tree_method,
         'predictor': predictor,
-        'device': device,
+        'device': device,  # 使用新的device参数
         'objective': 'binary:logistic',
-        'eval_metric': ['logloss', 'auc'],  # 添加多个评估指标
+        'eval_metric': 'logloss',
         'random_state': random_seed,
         'learning_rate': 0.05,
         'n_estimators': 300,
@@ -463,139 +454,114 @@ def build_xgboost_model(X_train, y_train, X_val, y_val, random_seed=42,
         'min_child_weight': 3,
         'subsample': 0.8,
         'colsample_bytree': 0.8,
-        'gamma': 0.1,
-        'scale_pos_weight': 1,  # 处理类别不平衡
-        'max_bin': 256  # GPU优化参数
+        'gamma': 0.1
     }
     
-    if use_gpu:
-        # GPU特定参数
-        params.update({
-            'sampling_method': 'gradient_based',
-            'tree_method': 'gpu_hist',
-            'gpu_id': optimal_device,
-            'predictor': 'gpu_predictor'
-        })
+    # 检查特征相关性之前确保数据类型正确
+    X_train_orig = X_train
+    X_val_orig = X_val
     
-    # 创建DMatrix数据结构
-    if use_gpu:
-        try:
-            dtrain = xgb.DMatrix(data=X_train, label=y_train, enable_categorical=True)
-            dval = xgb.DMatrix(data=X_val, label=y_val, enable_categorical=True)
-        except Exception as e:
-            print(f"创建GPU DMatrix失败，尝试使用CPU: {e}")
-            # 转换回CPU
-            X_train = cp.asnumpy(X_train) if isinstance(X_train, cp.ndarray) else X_train
-            y_train = cp.asnumpy(y_train) if isinstance(y_train, cp.ndarray) else y_train
-            X_val = cp.asnumpy(X_val) if isinstance(X_val, cp.ndarray) else X_val
-            y_val = cp.asnumpy(y_val) if isinstance(y_val, cp.ndarray) else y_val
-            dtrain = xgb.DMatrix(data=X_train, label=y_train, enable_categorical=True)
-            dval = xgb.DMatrix(data=X_val, label=y_val, enable_categorical=True)
+    # 检查特征相关性，并返回筛选后的特征和列名
+    X_train, selected_columns = check_feature_correlations(X_train)
+    
+    # 确保验证集也使用相同的特征集
+    if isinstance(X_val, (np.ndarray, cp.ndarray)):
+        if isinstance(X_val, cp.ndarray):
+            X_val = cp.asnumpy(X_val)
+        # 使用索引选择列
+        selected_indices = [i for i, _ in enumerate(selected_columns)]
+        X_val = X_val[:, selected_indices]
     else:
-        dtrain = xgb.DMatrix(data=X_train, label=y_train, enable_categorical=True)
-        dval = xgb.DMatrix(data=X_val, label=y_val, enable_categorical=True)
+        # 如果是DataFrame，使用列名选择
+        X_val = X_val[selected_columns]
     
-    # 设置评估列表
-    evals = [(dtrain, 'train'), (dval, 'eval')]
+    # 创建和训练模型
+    xgb_model = xgb.XGBClassifier(**params)
     
     # 训练模型
-    num_boost_round = params.pop('n_estimators')
-    early_stopping_rounds = 10 if use_early_stopping else None
-    
-    # 使用训练API而不是sklearn接口
-    xgb_model = xgb.train(
-        params,
-        dtrain,
-        num_boost_round=num_boost_round,
-        evals=evals,
-        early_stopping_rounds=early_stopping_rounds,
-        verbose_eval=10
-    )
-    
-    # 预测
-    if use_gpu:
-        try:
-            y_pred = xgb_model.predict(dval)
-        except Exception as e:
-            print(f"GPU预测失败，使用CPU: {e}")
-            # 确保验证数据在CPU上
-            if isinstance(X_val, cp.ndarray):
-                X_val = cp.asnumpy(X_val)
-            if isinstance(y_val, cp.ndarray):
-                y_val = cp.asnumpy(y_val)
-            y_pred = xgb_model.predict(xgb.DMatrix(X_val))
+    if use_early_stopping:
+        eval_set = [(X_val, y_val)]
+        xgb_model.fit(
+            X_train, y_train,
+            eval_set=eval_set,
+            verbose=True
+        )
     else:
-        y_pred = xgb_model.predict(dval)
+        xgb_model.fit(X_train, y_train)
     
-    # 评估模型
-    xgb_brier = brier_score_loss(cp.asnumpy(y_val) if use_gpu else y_val, 
-                                cp.asnumpy(y_pred) if use_gpu else y_pred)
-    xgb_log_loss_val = log_loss(cp.asnumpy(y_val) if use_gpu else y_val, 
-                               cp.asnumpy(y_pred) if use_gpu else y_pred)
+    # 转换回CPU进行评估
+    if use_gpu:
+        X_val = utils.to_cpu(X_val)
+        y_val = utils.to_cpu(y_val)
     
-    print(f"\nXGBoost模型评估 ({gender}):")
-    print(f"  - Brier分数: {xgb_brier:.6f}")
-    print(f"  - 对数损失: {xgb_log_loss_val:.6f}")
+    # 预测和评估
+    xgb_pred = xgb_model.predict_proba(X_val)[:, 1]
     
-    # 特征重要性分析
-    importance_type = 'weight'  # 可选 'weight', 'gain', 'cover', 'total_gain', 'total_cover'
+    # 记录原始输入类型
+    is_numpy_train = isinstance(X_train, np.ndarray)
+    is_numpy_val = isinstance(X_val, np.ndarray)
+    
+    # 预测并评估 / Predict and evaluate
+    xgb_brier = brier_score_loss(y_val, xgb_pred)
+    xgb_log_loss_val = log_loss(y_val, xgb_pred)
+    
+    print(f"XGBoost模型评估 ({gender}): / XGBoost model evaluation ({gender}):")
+    print(f"  - Brier分数: {xgb_brier:.6f} / Brier score: {xgb_brier:.6f}")
+    print(f"  - 对数损失: {xgb_log_loss_val:.6f} / Log Loss: {xgb_log_loss_val:.6f}")
+    
+    # 输出特征重要性 / Output feature importance
+    # 确保使用正确的特征名称
+    if isinstance(X_train, np.ndarray):
+        # 如果是numpy数组，使用索引作为特征名称
+        feature_names = [f'feature_{i}' for i in range(X_train.shape[1])]
+    else:
+        # 否则使用DataFrame的列名
+        feature_names = X_train.columns.tolist()
+        
     feature_importance = pd.DataFrame({
-        'Feature': xgb_model.feature_names,
-        'Importance': xgb_model.get_score(importance_type=importance_type).values()
+        'Feature': feature_names,
+        'Importance': xgb_model.feature_importances_
     }).sort_values('Importance', ascending=False)
     
-    print(f"\nXGBoost特征重要性（前15）({gender}):")
+    print(f"\nXGBoost特征重要性（前15）({gender}): / XGBoost feature importance (top 15) ({gender}):")
     print(feature_importance.head(15))
     
-    # 可视化
+    # 可视化特征重要性 / Visualize feature importance
     if visualize:
         plt.figure(figsize=(12, 10))
         sns.barplot(x='Importance', y='Feature', data=feature_importance.head(20))
-        plt.title(f'XGBoost特征重要性 - 前20 ({gender})')
+        plt.title(f'XGBoost特征重要性 - 前20 ({gender}) / XGBoost Feature Importance - Top 20 ({gender})')
         plt.tight_layout()
         plt.show()
         
-        # 预测分布可视化
+        # 可视化预测分布 / Visualize prediction distribution
         plt.figure(figsize=(12, 5))
         plt.subplot(1, 2, 1)
-        sns.histplot(y_pred, bins=20, kde=True)
-        plt.title(f'预测概率分布 ({gender})')
-        plt.xlabel('预测胜率')
-        plt.ylabel('频率')
+        sns.histplot(xgb_pred, bins=20, kde=True)
+        plt.title(f'预测概率分布 ({gender}) / Prediction Probability Distribution ({gender})')
+        plt.xlabel('预测胜率 / Predicted Win Probability')
+        plt.ylabel('频率 / Frequency')
         
-        # 预测vs实际结果
+        # 可视化预测vs实际结果 / Visualize prediction vs actual results
         plt.subplot(1, 2, 2)
-        sns.boxplot(x=cp.asnumpy(y_val) if use_gpu else y_val, 
-                   y=cp.asnumpy(y_pred) if use_gpu else y_pred)
-        plt.title(f'预测vs实际结果 ({gender})')
-        plt.xlabel('实际结果 (0=输, 1=赢)')
-        plt.ylabel('预测胜率')
+        sns.boxplot(x=y_val, y=xgb_pred)
+        plt.title(f'预测vs实际结果 ({gender}) / Predictions vs Actual Results ({gender})')
+        plt.xlabel('实际结果 (0=输, 1=赢) / Actual Result (0=Loss, 1=Win)')
+        plt.ylabel('预测胜率 / Predicted Win Probability')
         plt.tight_layout()
         plt.show()
     
-    # 保存模型
+    # 保存模型（如果指定路径） / Save model if path specified
     if save_model_path:
-        try:
-            # 保存模型和特征名称
-            model_data = {
-                'model': xgb_model,
-                'feature_names': xgb_model.feature_names,
-                'device': device
-            }
-            utils.save_model(model_data, save_model_path)
-            print(f"模型已保存到 {save_model_path}")
-        except Exception as e:
-            print(f"保存模型失败: {e}")
+        model_data = {
+            'model': xgb_model,
+            'columns': selected_columns
+        }
+        
+        utils.save_model(model_data, save_model_path)
+        print(f"模型已保存到 {save_model_path} / Model saved to {save_model_path}")
     
-    # 清理GPU内存
-    if use_gpu:
-        try:
-            del dtrain, dval
-            cp.get_default_memory_pool().free_all_blocks()
-        except Exception as e:
-            print(f"清理GPU内存失败: {e}")
-    
-    return xgb_model, xgb_model.feature_names
+    return xgb_model, selected_columns
 
 
 # 添加一个新函数来处理男女比赛数据的共同训练 / Add a new function to handle combined training for men's and women's data
