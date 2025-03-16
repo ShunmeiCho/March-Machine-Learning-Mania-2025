@@ -2,7 +2,18 @@
 
 ## Introduction
 
-The NCAA Basketball Tournament Prediction System is a comprehensive machine learning solution designed to predict the outcomes of NCAA basketball tournament games with high accuracy. This system implements a sophisticated prediction pipeline that processes historical basketball data, engineers relevant features, trains an XGBoost model, and generates calibrated win probability predictions for tournament matchups.
+The NCAA Basketball Tournament Prediction System is a comprehensive machine learning solution designed to predict the outcomes of NCAA basketball tournament games with high accuracy. This system implements a sophisticated prediction pipeline that processes historical basketball data, engineers relevant features, trains optimized XGBoost models, and generates calibrated win probability predictions for tournament matchups.
+
+This system is specifically designed for the [March Machine Learning Mania 2025](https://www.kaggle.com/competitions/march-machine-learning-mania-2025) Kaggle competition, which challenges participants to predict the outcomes of the NCAA basketball tournaments.
+
+### Key Improvements in Version 2.0
+
+- **Dual-gender prediction support**: Now includes support for both men's and women's NCAA basketball tournaments
+- **Performance optimizations**: Improved parallel processing and vectorized operations for faster data processing
+- **Memory efficiency**: Better memory usage and caching strategies for handling large datasets
+- **Enhanced visualization**: Comprehensive visual analytics for model evaluation and prediction distributions
+- **Robust error handling**: Improved validation and error recovery throughout the pipeline
+- **Bilingual documentation**: Full documentation in both English and Chinese
 
 ## System Requirements
 
@@ -15,7 +26,8 @@ The NCAA Basketball Tournament Prediction System is a comprehensive machine lear
 - XGBoost
 - joblib
 - tqdm
-- concurrent.futures
+- psutil (for memory monitoring)
+- concurrent.futures (for parallel processing)
 
 ## Installation
 
@@ -39,7 +51,7 @@ The project is organized into several modules, each handling a specific aspect o
 - **main.py**: Orchestrates the entire workflow and provides command-line interface
 - **data_preprocessing.py**: Handles data loading, exploration, and train-validation splitting
 - **feature_engineering.py**: Creates features from raw data (team stats, seeds, matchups)
-- **train_model.py**: Implements XGBoost model training with hyperparameter tuning
+- **train_model.py**: Implements XGBoost model training with gender-specific models
 - **submission.py**: Generates tournament predictions for submission
 - **evaluate.py**: Contains evaluation metrics and visualization tools
 - **utils.py**: Provides utility functions used across the system
@@ -57,40 +69,60 @@ python main.py --data_path ./data --output_path ./output --target_year 2025
 ```bash
 python main.py --data_path ./data \
                --output_path ./output \
-               --train_start_year 2010 \
+               --train_start_year 2016 \
                --train_end_year 2024 \
                --target_year 2025 \
                --explore \
                --random_seed 42 \
-               --n_cores 8
+               --n_cores 8 \
+               --generate_predictions
 ```
 
 ### Command-line Arguments
 
-- `--data_path`: Path to the data directory (default: './data')
-- `--output_path`: Path for output files (default: './output')
-- `--train_start_year`: Start year for training data (default: 2010)
+- `--data_path`: Path to the data directory (default: '../input')
+- `--output_path`: Path for output files (default: '../output')
+- `--explore`: Enable data exploration and visualization (default: False)
+- `--train_start_year`: Start year for training data (default: 2016)
 - `--train_end_year`: End year for training data (default: 2024)
 - `--target_year`: Target year for predictions (default: 2025)
-- `--explore`: Enable data exploration (default: False)
-- `--load_model`: Load pre-trained model instead of training new one (default: False)
-- `--load_features`: Load pre-calculated features instead of recalculating (default: False)
 - `--random_seed`: Random seed for reproducibility (default: 42)
 - `--n_cores`: Number of CPU cores for parallel processing (default: auto-detect)
-- `--clear_cache`: Clear computation cache (default: False)
+- `--use_cache`: Use cached data to speed up processing (default: False)
+- `--xgb_trees`: Number of trees for XGBoost model (default: 500)
+- `--xgb_depth`: Maximum tree depth for XGBoost model (default: 6)
+- `--xgb_lr`: Learning rate for XGBoost model (default: 0.05)
+- `--generate_predictions`: Generate predictions for all possible matchups (default: False)
+- `--output_file`: Output file name for predictions (default: timestamp-based)
+- `--load_models`: Load pre-trained models instead of training new ones (default: False)
+- `--men_model`: Path to men's model file (default: None)
+- `--women_model`: Path to women's model file (default: None)
+- `--men_features`: Path to men's features file (default: None)
+- `--women_features`: Path to women's features file (default: None)
 
 ## Data Requirements
 
 The system expects the following CSV files in the data directory:
 
 - **MTeams.csv**: Men's teams information
+- **WTeams.csv**: Women's teams information
 - **MRegularSeasonCompactResults.csv**: Men's regular season results
+- **WRegularSeasonCompactResults.csv**: Women's regular season results
 - **MNCAATourneyCompactResults.csv**: Men's tournament results
+- **WNCAATourneyCompactResults.csv**: Women's tournament results
 - **MRegularSeasonDetailedResults.csv**: Men's regular season detailed stats
+- **WRegularSeasonDetailedResults.csv**: Women's regular season detailed stats
 - **MNCAATourneySeeds.csv**: Men's tournament seeds
+- **WNCAATourneySeeds.csv**: Women's tournament seeds
 - **SampleSubmissionStage1.csv**: Sample submission format
 
 ## Key Features
+
+### Dual-Gender Prediction
+
+- Separate models trained for men's and women's tournaments
+- Gender-specific feature engineering tailored to each tournament's characteristics
+- Combined prediction outputs for comprehensive tournament coverage
 
 ### Advanced Feature Engineering
 
@@ -99,28 +131,31 @@ The system expects the following CSV files in the data directory:
 - Historical matchup analysis
 - Tournament progression probability estimation
 - Favorite-longshot bias correction
+- Gender-specific feature adjustments
 
 ### Performance Optimization
 
-- Parallel processing for compute-intensive operations
+- Multi-core parallel processing for compute-intensive operations
 - Memory caching to avoid redundant calculations
 - Vectorized operations for improved efficiency
-- Memory usage optimization for large datasets
+- Memory usage monitoring and optimization
+- Time-aware function decorators for performance tracking
 
 ### Robust Evaluation
 
-- Multiple metrics (Brier score, log loss, accuracy)
+- Multiple metrics (Brier score, log loss, accuracy, ROC AUC)
 - Calibration curve analysis
-- Visual prediction distributions
+- Visual prediction distributions by gender
 - Risk-optimized submission strategy based on Brier score properties
+- Comparison analytics between men's and women's prediction models
 
 ## Prediction Pipeline
 
-1. **Data Loading**: Load and preprocess historical basketball data
-2. **Feature Engineering**: Create predictive features from raw data
-3. **Model Training**: Train an XGBoost model with optimized hyperparameters
+1. **Data Loading**: Load and preprocess historical basketball data for both genders
+2. **Feature Engineering**: Create predictive features from raw data with gender-specific considerations
+3. **Model Training**: Train separate XGBoost models for men's and women's tournaments
 4. **Evaluation**: Evaluate model performance using multiple metrics
-5. **Prediction Generation**: Create predictions for tournament matchups
+5. **Prediction Generation**: Create predictions for all possible tournament matchups
 6. **Risk Strategy Application**: Apply optimal risk strategy for Brier score
 7. **Submission Creation**: Format predictions for competition submission
 
@@ -131,64 +166,78 @@ The system implements several theoretical insights to improve prediction accurac
 - **Brier Score Optimization**: For predictions with approximately 33.3% win probability, a strategic risk adjustment is applied to optimize the expected Brier score.
 - **Favorite-Longshot Bias Correction**: The system corrects for the systematic underestimation of strong teams (low seeds) and overestimation of weak teams (high seeds).
 - **Time-Aware Validation**: Validation is performed using more recent seasons to better reflect the temporal nature of basketball predictions.
+- **Gender-Specific Modeling**: Separate models capture the unique characteristics of men's and women's basketball tournaments.
 
 ## Example Results
 
 The system generates several output files:
 
-- Trained model file (xgb_model.pkl)
-- Feature cache (features.pkl)
+- Trained model files for both men's and women's tournaments (men_model.pkl, women_model.pkl)
+- Feature cache files (men_features.pkl, women_features.pkl)
 - Prediction submission file (submission_YYYYMMDD_HHMMSS.csv)
-- Model evaluation metrics (model_metrics_YYYYMMDD_HHMMSS.txt)
-- Visualizations (if enabled)
+- Model evaluation metrics and visualizations
+- Comparative analysis between men's and women's predictions
 
 ## Advanced Usage
 
-### Training a Custom Model
+### Training Gender-Specific Models
 
 ```python
-from train_model import build_xgboost_model
-from utils import save_model
+from train_model import train_gender_specific_models
+from utils import save_features
 
-# Train custom model
-xgb_model, model_columns = build_xgboost_model(
-    X_train, y_train, X_val, y_val, 
-    random_seed=42,
-    param_tuning=True,
-    visualize=True
+# Prepare features for both genders
+m_features, m_targets = merge_features(m_train_data, m_team_stats, m_seed_features, m_matchup_history)
+w_features, w_targets = merge_features(w_train_data, w_team_stats, w_seed_features, w_matchup_history)
+
+# Train gender-specific models
+models = train_gender_specific_models(
+    m_features, m_targets, w_features, w_targets,
+    m_tourney_train, w_tourney_train,
+    random_seed=42, save_models_dir='./models'
 )
 
-# Save model
-save_model(xgb_model, 'custom_model.pkl', model_columns)
+# Access individual models
+men_model = models['men']['model']
+women_model = models['women']['model']
 ```
 
-### Generating Predictions
+### Generating Combined Predictions
 
 ```python
-from submission import prepare_tournament_predictions, create_submission
-from utils import load_model, load_features
+from submission import prepare_all_predictions, create_submission
 
-# Load model and features
-model, model_columns = load_model('model.pkl')
-features_dict = load_features('features.pkl')
-
-# Generate predictions
-predictions = prepare_tournament_predictions(
-    model, features_dict, sample_submission, model_columns, year=2025
+# Generate predictions for both genders
+all_predictions = prepare_all_predictions(
+    model, features_dict, data_dict, 
+    model_columns=model_columns,
+    year=2025, 
+    gender='both'  # Process both men's and women's matchups
 )
 
 # Create submission file
-submission = create_submission(predictions, sample_submission, 'my_submission.csv')
+submission = create_submission(all_predictions, sample_submission, 'submission_2025.csv')
 ```
 
 ## Performance Notes
 
-- Feature engineering is the most time-consuming part of the pipeline; use the `--load_features` flag to reuse previously calculated features.
+- Feature engineering is the most time-consuming part of the pipeline; use the `--use_cache` flag to reuse previously calculated features.
 - Parallel processing significantly improves performance but increases memory usage.
-- For extremely large datasets, adjust the code to use chunked processing or reduce the date range.
+- The system includes memory usage monitoring to help identify performance bottlenecks.
+- For extremely large datasets, adjust the `n_cores` parameter to balance speed and memory usage.
+
+## Visualization
+
+The system generates several visualizations to help understand model performance:
+
+- Prediction distribution charts for both men's and women's tournaments
+- Calibration curves showing predicted vs. actual win probabilities
+- Feature importance plots highlighting the most predictive factors
+- Comparison plots showing differences between men's and women's predictions
 
 ## References
 
+- March Machine Learning Mania 2025: [https://www.kaggle.com/competitions/march-machine-learning-mania-2025](https://www.kaggle.com/competitions/march-machine-learning-mania-2025)
 - XGBoost: [https://xgboost.readthedocs.io/](https://xgboost.readthedocs.io/)
 - Brier Score: [https://en.wikipedia.org/wiki/Brier_score](https://en.wikipedia.org/wiki/Brier_score)
 - NCAA Tournament: [https://www.ncaa.com/march-madness](https://www.ncaa.com/march-madness)
