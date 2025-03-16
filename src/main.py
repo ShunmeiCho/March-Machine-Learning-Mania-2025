@@ -847,7 +847,7 @@ def main():
         visualization_prediction_distribution(
             None, 
             m_pred_probs, 
-            title='Men\'s Teams Prediction Probability Distribution',
+            title='Men\'s Predictions Distribution',
             save_path=os.path.join(vis_dir, 'men_predictions_dist.png')
         )
         
@@ -856,7 +856,7 @@ def main():
         visualization_prediction_distribution(
             None, 
             w_pred_probs, 
-            title='Women\'s Teams Prediction Probability Distribution',
+            title='Women\'s Predictions Distribution',
             save_path=os.path.join(vis_dir, 'women_predictions_dist.png')
         )
         
@@ -865,7 +865,7 @@ def main():
         visualization_prediction_distribution(
             None, 
             all_pred_probs, 
-            title='All Teams Prediction Probability Distribution',
+            title='All Predictions Distribution',
             save_path=os.path.join(vis_dir, 'all_predictions_dist.png')
         )
         

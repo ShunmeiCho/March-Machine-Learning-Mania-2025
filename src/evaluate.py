@@ -255,7 +255,8 @@ def visualization_prediction_distribution(y_pred: Union[List, np.ndarray],
                                          save_path: Optional[str] = None,
                                          show_plot: bool = True,
                                          fig_size: Tuple[int, int] = (12, 6),
-                                         key_points: List[float] = [0.3, 0.5, 0.7]) -> plt.Figure:
+                                         key_points: List[float] = [0.3, 0.5, 0.7],
+                                         title: Optional[str] = None) -> plt.Figure:
     """
     Visualize the distribution of predictions.
     
@@ -287,6 +288,9 @@ def visualization_prediction_distribution(y_pred: Union[List, np.ndarray],
     key_points : list of float, optional (default=[0.3, 0.5, 0.7])
         Key probability points to highlight with vertical lines
         用垂直线突出显示的关键概率点
+    title : str, optional (default=None)
+        Title for the plot
+        图表标题
         
     Returns:
     --------
@@ -306,7 +310,11 @@ def visualization_prediction_distribution(y_pred: Union[List, np.ndarray],
     if y_true is not None:
         y_true_np = np.asarray(y_true)
         if not np.all(np.isin(y_true_np, [0, 1])):
-            raise ValueError("True labels must be binary (0 or 1)")
+            # 如果y_true不是二元值，将其转换为None而不是抛出错误
+            # If y_true is not binary, convert it to None instead of raising an error
+            print("警告：真实标签包含非二元值(0/1)，将忽略真实标签进行可视化。")
+            print("Warning: True labels contain non-binary values (0/1), ignoring true labels for visualization.")
+            y_true = None
     
     # Create figure with specified size
     # 创建指定大小的图形
@@ -314,11 +322,16 @@ def visualization_prediction_distribution(y_pred: Union[List, np.ndarray],
     
     # Plot prediction distribution
     # 绘制预测分布
-    ax1 = plt.subplot(1, 2, 1)
+    ax1 = plt.subplot(1, 2 if y_true is not None else 1, 1)
     sns.histplot(y_pred_np, bins=20, kde=True, ax=ax1)
     ax1.set_title('Prediction Distribution')
     ax1.set_xlabel('Predicted Win Probability')
     ax1.set_ylabel('Frequency')
+    
+    # Add main title if provided
+    # 如果提供了主标题，则添加
+    if title:
+        plt.suptitle(title, fontsize=16, y=1.05)
     
     # Add vertical lines at key probability points
     # 在关键概率点添加垂直线
@@ -349,6 +362,10 @@ def visualization_prediction_distribution(y_pred: Union[List, np.ndarray],
     # 如果提供了真实值，则按结果绘制预测
     if y_true is not None:
         ax2 = plt.subplot(1, 2, 2)
+        
+        # 在上面的代码中，我们可能已经将y_true设置为None，所以需要重新获取y_true_np
+        # We might have set y_true to None above, so we need to get y_true_np again
+        y_true_np = np.asarray(y_true)
         
         # Create a more efficient data structure for plotting
         # 创建更高效的数据结构用于绘图
@@ -397,7 +414,8 @@ def calibration_curve(y_true: Union[List, np.ndarray],
                      y_pred: Union[List, np.ndarray], 
                      n_bins: int = 10,
                      save_path: Optional[str] = None,
-                     show_plot: bool = True) -> Dict[str, np.ndarray]:
+                     show_plot: bool = True,
+                     title: Optional[str] = None) -> Dict[str, np.ndarray]:
     """
     Generate and visualize prediction calibration curve.
     
@@ -425,6 +443,9 @@ def calibration_curve(y_true: Union[List, np.ndarray],
     show_plot : bool, optional (default=True)
         Whether to display the plot (set to False for batch processing)
         是否显示图形（批处理时设为False）
+    title : str, optional (default=None)
+        Title for the plot
+        图表标题
         
     Returns:
     --------
@@ -523,7 +544,7 @@ def calibration_curve(y_true: Union[List, np.ndarray],
     
     plt.xlabel('Predicted Probability')
     plt.ylabel('Actual Outcome Rate')
-    plt.title('Prediction Calibration Curve')
+    plt.title(title or 'Prediction Calibration Curve')
     plt.legend()
     plt.grid(alpha=0.3)
     plt.tight_layout()
