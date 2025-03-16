@@ -1,5 +1,7 @@
 # NCAA Basketball Tournament Prediction System
 
+[English](README_EN.md) | [中文](README_CN.md)
+
 ## Introduction
 
 The NCAA Basketball Tournament Prediction System is a comprehensive machine learning solution designed to predict the outcomes of NCAA basketball tournament games with high accuracy. This system implements a sophisticated prediction pipeline that processes historical basketball data, engineers relevant features, trains optimized XGBoost models, and generates calibrated win probability predictions for tournament matchups.
