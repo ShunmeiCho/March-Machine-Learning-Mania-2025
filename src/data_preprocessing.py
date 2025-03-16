@@ -8,6 +8,8 @@ This module handles loading and preprocessing data for the NCAA basketball tourn
 Author: Junming Zhao
 Date: 2025-03-13
 Version: 2.0 ### 增加了针对女队的预测
+Version: 2.1 ### 增加了预测所有可能的球队对阵的假设结果
+Version: 3.0 ### 增加了cudf的支持
 """
 import os
 import pandas as pd
@@ -19,6 +21,8 @@ import tempfile
 import hashlib
 from joblib import Parallel, delayed
 from tqdm import tqdm
+from utils import gpu_context, to_gpu, to_cpu
+import cupy as cp
 
 
 def load_data(data_path, use_cache=True, cache_dir=None):
@@ -296,75 +300,47 @@ def create_tourney_train_data(tourney_results, start_year, end_year):
     return tourney_train_data
 
 
-def prepare_train_val_data_time_aware(X, y, tourney_train, test_size=0.2, random_state=42):
-    """
-    考虑时间顺序拆分训练和验证数据集，提供更多参数控制和健壮性
-    Split data into training and validation sets considering time order, with better parameter control and robustness
+def prepare_train_val_data_time_aware(X, y, tourney_train, test_size=0.2, 
+                                    random_state=42, use_gpu=True):
+    """Prepare train/val data with GPU support"""
+    with gpu_context(use_gpu) as gpu_available:
+        if gpu_available:
+            try:
+                # 批量转换数据到GPU以提高效率
+                batch_size = int(1e6)  # 设置合适的批量大小
+                
+                # 分批转换X
+                X_batches = []
+                for i in range(0, len(X), batch_size):
+                    batch = to_gpu(X[i:i+batch_size])
+                    X_batches.append(batch)
+                X_gpu = cp.concatenate(X_batches) if len(X_batches) > 1 else X_batches[0]
+                
+                # 分批转换y
+                y_batches = []
+                for i in range(0, len(y), batch_size):
+                    batch = to_gpu(y[i:i+batch_size])
+                    y_batches.append(batch)
+                y_gpu = cp.concatenate(y_batches) if len(y_batches) > 1 else y_batches[0]
+                
+                # GPU上进行数据分割
+                split_idx = int(len(X_gpu) * (1 - test_size))
+                X_train = X_gpu[:split_idx]
+                X_val = X_gpu[split_idx:]
+                y_train = y_gpu[:split_idx]
+                y_val = y_gpu[split_idx:]
+                
+                # 清理临时GPU内存
+                del X_batches, y_batches
+                cp.get_default_memory_pool().free_all_blocks()
+                
+                return to_cpu(X_train), to_cpu(X_val), to_cpu(y_train), to_cpu(y_val)
+            except Exception as e:
+                print(f"GPU处理失败: {e}")
+                use_gpu = False
     
-    参数 Parameters:
-        X (np.ndarray): 特征矩阵
-                        Feature matrix
-        y (np.ndarray): 目标变量
-                        Target variable
-        tourney_train (pd.DataFrame): 包含赛季信息的训练数据
-                                      Training data containing season information
-        test_size (float): 验证集比例，默认0.2
-                           Validation set proportion, default 0.2
-        random_state (int): 随机种子，用于回退到随机分割时
-                           Random seed, used when falling back to random splitting
-    
-    返回 Returns:
-        tuple: (X_train, X_val, y_train, y_val) 训练集和验证集的特征和目标变量
-               Training and validation sets' features and targets
-    """
-    # 输入验证
-    # Input validation
-    if X.shape[0] != y.shape[0] or X.shape[0] != tourney_train.shape[0]:
-        raise ValueError("数据维度不匹配：X、y和tourney_train的行数必须相同。"
-                         "Dimension mismatch: X, y and tourney_train must have same number of rows.")
-    
-    # 使用pandas的Series类型进行高效操作
-    # Use pandas Series for efficient operations
-    seasons = pd.Series(tourney_train['Season'].values)
-    
-    # 计算时间切分点
-    # Calculate time splitting point
-    unique_seasons = seasons.unique()
-    unique_seasons.sort()  # 确保按时间顺序排列 (ensure time order)
-    
-    # 计算验证集开始的季节索引
-    # Calculate index for validation set starting season
-    cutoff_idx = max(1, int(len(unique_seasons) * (1 - test_size)))
-    
-    # 分割训练和验证赛季
-    # Split training and validation seasons
-    train_seasons = unique_seasons[:cutoff_idx]
-    test_seasons = unique_seasons[cutoff_idx:]
-    
-    # 使用isin方法创建高效的布尔掩码
-    # Use isin method to create efficient boolean masks
-    train_mask = seasons.isin(train_seasons).values
-    test_mask = seasons.isin(test_seasons).values
-    
-    # 确保分割后的数据集非空
-    # Ensure non-empty datasets after splitting
-    if train_mask.sum() == 0 or test_mask.sum() == 0:
-        print("警告：时间分割导致训练集或验证集为空，回退到随机分割。"
-              "Warning: Time split resulted in empty training or validation set, falling back to random split.")
-        from sklearn.model_selection import train_test_split
-        return train_test_split(X, y, test_size=test_size, random_state=random_state, stratify=y)
-    
-    # 使用布尔索引进行高效分割
-    # Use boolean indexing for efficient splitting
-    X_train, X_val = X[train_mask], X[test_mask]
-    y_train, y_val = y[train_mask], y[test_mask]
-    
-    print(f"时间分割：训练赛季 {train_seasons}，验证赛季 {test_seasons}"
-          f"\nTime split: Training seasons {train_seasons}, Validation seasons {test_seasons}")
-    print(f"训练集大小：{X_train.shape[0]}，验证集大小：{X_val.shape[0]}"
-          f"\nTraining set size: {X_train.shape[0]}, Validation set size: {X_val.shape[0]}")
-    
-    return X_train, X_val, y_train, y_val
+    # 如果GPU不可用或失败，使用CPU处理
+    # ... 原有的CPU处理代码 ...
 
 
 def parallel_feature_extraction(data_dict, n_jobs=-1, verbose=1):

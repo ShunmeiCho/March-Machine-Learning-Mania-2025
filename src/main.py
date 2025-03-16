@@ -10,6 +10,8 @@ This is the main script that orchestrates the entire workflow of the prediction 
 Author: Junming Zhao
 Date: 2025-03-13
 Version: 2.0 ### 增加了针对女队的预测
+Version: 2.1 ### 增加了预测所有可能的球队对阵的假设结果
+Version: 3.0 ### 增加了cudf的支持
 """
 import os
 import sys
@@ -98,40 +100,36 @@ def parse_arguments():
 
 
 def setup_environment(args):
-    """
-    设置环境，包括随机种子、创建输出目录等
-    Setup environment, including random seed, creating output directories, etc.
-    
-    参数 Parameters:
-        args: 命令行参数解析结果
-              Command line argument parsing results
-    
-    返回 Returns:
-        int: 可用的CPU核心数量 (Number of available CPU cores)
-    """
+    """Setup environment with GPU support"""
     # 设置随机种子
-    # Set random seed
     set_random_seed(args.random_seed)
     
+    # GPU配置
+    try:
+        import cupy as cp
+        num_gpus = cp.cuda.runtime.getDeviceCount()
+        if num_gpus > 0:
+            print(f"检测到 {num_gpus} 个GPU设备")
+            cp.cuda.Device(0).use()
+            args.use_gpu = True
+        else:
+            print("未检测到GPU设备，将使用CPU")
+            args.use_gpu = False
+    except Exception as e:
+        print(f"GPU初始化失败: {e}")
+        args.use_gpu = False
+    
     # 创建输出目录
-    # Create output directory
     if args.output_path:
         ensure_directory(args.output_path)
         ensure_directory(os.path.join(args.output_path, 'models'))
         ensure_directory(os.path.join(args.output_path, 'predictions'))
     
-    # 获取可用的CPU核心数
-    # Get available CPU cores
+    # 设置CPU核心数
     if args.n_cores == -1:
-        # 使用所有可用核心减1，避免系统过载
-        # Use all available cores minus 1 to avoid system overload
-        import multiprocessing
         n_cores = max(1, multiprocessing.cpu_count() - 1)
     else:
         n_cores = args.n_cores
-    
-    # 删除此处重复加载的数据代码
-    # Remove duplicate data loading code
     
     return n_cores
 

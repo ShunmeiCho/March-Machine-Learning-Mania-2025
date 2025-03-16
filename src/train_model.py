@@ -9,6 +9,8 @@ This module handles training and optimizing the prediction model.
 Author: Junming Zhao
 Date: 2025-03-13
 Version: 2.0 ### 增加了针对女队的预测
+Version: 2.1 ### 增加了预测所有可能的球队对阵的假设结果
+Version: 3.0 ### 增加了cudf的支持
 """
 import os
 import pandas as pd
@@ -21,7 +23,9 @@ import xgboost as xgb
 from typing import Dict, List, Tuple, Optional, Union, Any
 from joblib import Memory
 from functools import partial
-import concurrent.futures  # 为并行处理添加导入
+import concurrent.futures
+import utils
+import cupy as cp
 
 # 添加中文字体支持
 # Add Chinese font support
@@ -87,52 +91,65 @@ def check_feature_correlations(X_train, threshold=0.95, enable_check=True):
     
     print("检查特征相关性... / Checking feature correlations...")
     
-    # 记录原始输入类型
-    is_numpy = isinstance(X_train, np.ndarray)
-    
-    # 如果是 numpy 数组，转换为 DataFrame
-    if is_numpy:
-        feature_names = [f'feature_{i}' for i in range(X_train.shape[1])]
-        X_train_df = pd.DataFrame(X_train, columns=feature_names)
-    else:
-        X_train_df = X_train
-        feature_names = X_train.columns.tolist()
-    
-    # 计算相关性矩阵
-    corr_matrix = X_train_df.corr().abs()
-    
-    # 获取上三角矩阵
-    upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
-    
-    # 找出高度相关的特征
-    to_drop = [column for column in upper.columns if any(upper[column] > threshold)]
-    
-    if len(to_drop) > 0:
-        print(f"发现 {len(to_drop)} 个高度相关特征: / Found {len(to_drop)} highly correlated features:")
-        for col in to_drop:
-            correlated_with = upper.index[upper[col] > threshold].tolist()
-            for other_col in correlated_with:
-                print(f"  - {col} 和 {other_col} 相关性: {corr_matrix.loc[col, other_col]:.4f} / correlation: {corr_matrix.loc[col, other_col]:.4f}")
+    try:
+        # 记录原始输入类型
+        is_numpy = isinstance(X_train, (np.ndarray, cp.ndarray))
         
-        print(f"从训练数据中删除 {len(to_drop)} 个高度相关特征 / Removing {len(to_drop)} highly correlated features from training data")
-        
-        # 从DataFrame中删除列
-        X_train_reduced_df = X_train_df.drop(columns=to_drop)
-        
-        # 获取保留的列名
-        selected_columns = X_train_reduced_df.columns.tolist()
-        
-        # 根据原始输入类型返回相应格式
+        # 如果是 numpy/cupy 数组，转换为 DataFrame
         if is_numpy:
-            return X_train_reduced_df.values, selected_columns
+            # 如果是 cupy 数组，先转换为 numpy
+            if isinstance(X_train, cp.ndarray):
+                X_train = cp.asnumpy(X_train)
+            feature_names = [f'feature_{i}' for i in range(X_train.shape[1])]
+            X_train_df = pd.DataFrame(X_train, columns=feature_names)
         else:
-            return X_train_reduced_df, selected_columns
-    else:
-        print("未发现高度相关特征 / No highly correlated features found")
-        if is_numpy:
-            return X_train, feature_names
+            X_train_df = X_train
+            feature_names = X_train.columns.tolist()
+        
+        # 计算相关性矩阵
+        corr_matrix = X_train_df.corr().abs()
+        
+        # 获取上三角矩阵
+        upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+        
+        # 找出高度相关的特征
+        to_drop = [column for column in upper.columns if any(upper[column] > threshold)]
+        
+        if len(to_drop) > 0:
+            print(f"发现 {len(to_drop)} 个高度相关特征: / Found {len(to_drop)} highly correlated features:")
+            for col in to_drop:
+                correlated_with = upper.index[upper[col] > threshold].tolist()
+                for other_col in correlated_with:
+                    print(f"  - {col} 和 {other_col} 相关性: {corr_matrix.loc[col, other_col]:.4f}")
+            
+            print(f"从训练数据中删除 {len(to_drop)} 个高度相关特征")
+            
+            # 从DataFrame中删除列
+            X_train_reduced_df = X_train_df.drop(columns=to_drop)
+            
+            # 获取保留的列名
+            selected_columns = X_train_reduced_df.columns.tolist()
+            
+            # 根据原始输入类型返回相应格式
+            if is_numpy:
+                return X_train_reduced_df.values, selected_columns
+            else:
+                return X_train_reduced_df, selected_columns
         else:
-            return X_train, feature_names
+            print("未发现高度相关特征 / No highly correlated features found")
+            if is_numpy:
+                return X_train, feature_names
+            else:
+                return X_train, feature_names
+                
+    except Exception as e:
+        print(f"特征相关性检查失败: {str(e)}")
+        print("返回原始特征")
+        # 发生错误时返回原始数据
+        if isinstance(X_train, pd.DataFrame):
+            return X_train, list(X_train.columns)
+        else:
+            return X_train, [f'feature_{i}' for i in range(X_train.shape[1])]
 
 
 def add_favorite_longshot_features(X_df):
@@ -380,197 +397,205 @@ def package_features(team_stats, seed_features, matchup_history, progression_pro
 
 def build_xgboost_model(X_train, y_train, X_val, y_val, random_seed=42, 
                        use_early_stopping=True, param_tuning=False,
-                       visualize=True, save_model_path=None, gender='men'):
-    """
-    建立XGBoost模型
-    Build XGBoost model
+                       visualize=True, save_model_path=None, gender='men',
+                       use_gpu=True):
+    """Build XGBoost model with improved GPU support"""
+    print(f"训练XGBoost模型... ({gender})")
     
-    参数:
-        X_train, y_train: 训练数据
-        X_val, y_val: 验证数据
-        random_seed: 随机种子
-        use_early_stopping: 是否使用早停
-        param_tuning: 是否调参
-        visualize: 是否可视化
-        save_model_path: 模型保存路径
-        gender: 性别
-        
-    返回:
-        model: 训练好的模型
-        selected_columns: 所选择的特征列名
-    """
-    print(f"训练XGBoost模型... ({gender}) / Training XGBoost model... ({gender})")
-    
-    # 记录原始输入类型
-    is_numpy_train = isinstance(X_train, np.ndarray)
-    is_numpy_val = isinstance(X_val, np.ndarray)
-    
-    # 检查特征相关性，并返回筛选后的特征和列名
-    X_train, selected_columns = check_feature_correlations(X_train)
-    
-    # 确保验证集也使用相同的特征集
-    if is_numpy_val:
-        # 如果X_val是NumPy数组，需要将列名转换为索引
-        # 创建一个DataFrame获取所有特征名
-        all_features = [f'feature_{i}' for i in range(X_val.shape[1])]
-        # 找到selected_columns中每个特征在all_features中的索引
-        selected_indices = [all_features.index(col) for col in selected_columns if col in all_features]
-        # 使用索引选择列
-        X_val = X_val[:, selected_indices]
+    # GPU配置优化
+    if use_gpu:
+        try:
+            # 检查CUDA是否可用
+            n_gpus = cp.cuda.runtime.getDeviceCount()
+            if n_gpus == 0:
+                raise RuntimeError("No GPU devices found")
+            
+            # 选择最佳GPU设备
+            free_memory = []
+            for i in range(n_gpus):
+                with cp.cuda.Device(i):
+                    meminfo = cp.cuda.runtime.memGetInfo()
+                    free_memory.append(meminfo[0])
+            optimal_device = free_memory.index(max(free_memory))
+            
+            # 设置当前GPU设备
+            cp.cuda.Device(optimal_device).use()
+            
+            # 设置XGBoost GPU参数
+            tree_method = 'gpu_hist'  # 使用GPU直方图方法
+            predictor = 'gpu_predictor'
+            device = f'cuda:{optimal_device}'
+            
+            # 确保数据在GPU上
+            if isinstance(X_train, (np.ndarray, pd.DataFrame)):
+                X_train = cp.asarray(X_train)
+            if isinstance(y_train, (np.ndarray, pd.Series)):
+                y_train = cp.asarray(y_train)
+            if isinstance(X_val, (np.ndarray, pd.DataFrame)):
+                X_val = cp.asarray(X_val)
+            if isinstance(y_val, (np.ndarray, pd.Series)):
+                y_val = cp.asarray(y_val)
+                
+            print(f"数据已转移到GPU设备 {device}")
+            
+        except Exception as e:
+            print(f"GPU初始化失败，使用CPU: {e}")
+            use_gpu = False
+            tree_method = 'hist'
+            predictor = 'cpu_predictor'
+            device = 'cpu'
     else:
-        # 如果X_val是DataFrame，可以直接用列名索引
-        X_val = X_val[selected_columns]
+        tree_method = 'hist'
+        predictor = 'cpu_predictor'
+        device = 'cpu'
     
-    # 创建XGBoost分类器
-    # Create XGBoost classifier
-    if param_tuning:
-        print(f"执行参数调优... ({gender}) / Performing parameter tuning... ({gender})")
-        # 参数网格搜索 (Parameter grid search)
-        # 配置要搜索的参数网格
-        param_grid = {
-            'max_depth': [3, 4, 5, 6],
-            'learning_rate': [0.01, 0.05, 0.1, 0.2],
-            'n_estimators': [50, 100, 200],
-            'subsample': [0.8, 0.9, 1.0],
-            'colsample_bytree': [0.8, 0.9, 1.0],
-            'min_child_weight': [1, 3, 5],
-            'gamma': [0, 0.1, 0.2]
-        }
-        xgb_model = xgb.XGBClassifier(
-            objective='binary:logistic',
-            eval_metric='logloss',
-            use_label_encoder=False,  # 避免警告信息
-            random_state=random_seed
-        )
-        # 定义网格搜索
-        # Define grid search
-        grid_search = GridSearchCV(
-            estimator=xgb_model,
-            param_grid=param_grid,
-            scoring='neg_log_loss',
-            cv=5,
-            n_jobs=-1,
-            verbose=1
-        )
-        # 执行网格搜索
-        # Execute grid search
-        grid_search.fit(X_train, y_train)
-        # 获取最佳参数
-        # Get best parameters
-        best_params = grid_search.best_params_
-        print(f"最佳参数 ({gender}): {best_params}")
-        # 使用最佳参数创建模型
-        # Create model with best parameters
-        xgb_model = xgb.XGBClassifier(
-            objective='binary:logistic',
-            eval_metric='logloss',
-            random_state=random_seed,
-            **best_params
-        )
-    else:
-        # 使用默认参数创建模型
-        # Create model with default parameters
-        xgb_model = xgb.XGBClassifier(
-            objective='binary:logistic',
-            eval_metric='logloss',
-            random_state=random_seed,
-            learning_rate=0.05,
-            n_estimators=300,
-            max_depth=5,
-            min_child_weight=3,
-            subsample=0.8,
-            colsample_bytree=0.8,
-            gamma=0.1
-        )
+    # 优化的XGBoost参数
+    params = {
+        'tree_method': tree_method,
+        'predictor': predictor,
+        'device': device,
+        'objective': 'binary:logistic',
+        'eval_metric': ['logloss', 'auc'],  # 添加多个评估指标
+        'random_state': random_seed,
+        'learning_rate': 0.05,
+        'n_estimators': 300,
+        'max_depth': 5,
+        'min_child_weight': 3,
+        'subsample': 0.8,
+        'colsample_bytree': 0.8,
+        'gamma': 0.1,
+        'scale_pos_weight': 1,  # 处理类别不平衡
+        'max_bin': 256  # GPU优化参数
+    }
     
-    # 设置基础模型 - 增强正则化以减少过拟合 / Set up base model - enhanced regularization to reduce overfitting
-    if use_early_stopping:
-        # 早停参数 / Early stopping parameters
-        early_stopping_rounds = 10
-        print(f"启用早停，rounds={early_stopping_rounds} / Enabling early stopping with rounds={early_stopping_rounds}")
-        
-        # 不要在参数中设置n_estimators，因为它会被eval_set覆盖 / Don't set n_estimators in params as it will be overridden by eval_set
-        xgb_params = {k: v for k, v in xgb_model.get_params().items() if k != 'n_estimators'}
-        xgb_params.update({
-            'early_stopping_rounds': early_stopping_rounds  # 在这里添加早停参数
+    if use_gpu:
+        # GPU特定参数
+        params.update({
+            'sampling_method': 'gradient_based',
+            'tree_method': 'gpu_hist',
+            'gpu_id': optimal_device,
+            'predictor': 'gpu_predictor'
         })
-        
-        xgb_model = xgb.XGBClassifier(**xgb_params)
-        
-        # 训练模型（带早停） / Train model (with early stopping)
-        print(f"训练模型（带早停）... ({gender}) / Training model with early stopping... ({gender})")
-        xgb_model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            verbose=True
-        )
-        
-        n_used = xgb_model.best_iteration + 1
-        print(f"早停在 {n_used} 轮后 ({gender}) / Early stopping occurred after {n_used} rounds ({gender})")
     
-    # 预测并评估 / Predict and evaluate
-    xgb_pred = xgb_model.predict_proba(X_val)[:, 1]
-    xgb_brier = brier_score_loss(y_val, xgb_pred)
-    xgb_log_loss_val = log_loss(y_val, xgb_pred)
-    
-    print(f"XGBoost模型评估 ({gender}): / XGBoost model evaluation ({gender}):")
-    print(f"  - Brier分数: {xgb_brier:.6f} / Brier score: {xgb_brier:.6f}")
-    print(f"  - 对数损失: {xgb_log_loss_val:.6f} / Log Loss: {xgb_log_loss_val:.6f}")
-    
-    # 输出特征重要性 / Output feature importance
-    # 确保使用正确的特征名称
-    if isinstance(X_train, np.ndarray):
-        # 如果是numpy数组，使用索引作为特征名称
-        feature_names = [f'feature_{i}' for i in range(X_train.shape[1])]
+    # 创建DMatrix数据结构
+    if use_gpu:
+        try:
+            dtrain = xgb.DMatrix(data=X_train, label=y_train, enable_categorical=True)
+            dval = xgb.DMatrix(data=X_val, label=y_val, enable_categorical=True)
+        except Exception as e:
+            print(f"创建GPU DMatrix失败，尝试使用CPU: {e}")
+            # 转换回CPU
+            X_train = cp.asnumpy(X_train) if isinstance(X_train, cp.ndarray) else X_train
+            y_train = cp.asnumpy(y_train) if isinstance(y_train, cp.ndarray) else y_train
+            X_val = cp.asnumpy(X_val) if isinstance(X_val, cp.ndarray) else X_val
+            y_val = cp.asnumpy(y_val) if isinstance(y_val, cp.ndarray) else y_val
+            dtrain = xgb.DMatrix(data=X_train, label=y_train, enable_categorical=True)
+            dval = xgb.DMatrix(data=X_val, label=y_val, enable_categorical=True)
     else:
-        # 否则使用DataFrame的列名
-        feature_names = X_train.columns.tolist()
-        
+        dtrain = xgb.DMatrix(data=X_train, label=y_train, enable_categorical=True)
+        dval = xgb.DMatrix(data=X_val, label=y_val, enable_categorical=True)
+    
+    # 设置评估列表
+    evals = [(dtrain, 'train'), (dval, 'eval')]
+    
+    # 训练模型
+    num_boost_round = params.pop('n_estimators')
+    early_stopping_rounds = 10 if use_early_stopping else None
+    
+    # 使用训练API而不是sklearn接口
+    xgb_model = xgb.train(
+        params,
+        dtrain,
+        num_boost_round=num_boost_round,
+        evals=evals,
+        early_stopping_rounds=early_stopping_rounds,
+        verbose_eval=10
+    )
+    
+    # 预测
+    if use_gpu:
+        try:
+            y_pred = xgb_model.predict(dval)
+        except Exception as e:
+            print(f"GPU预测失败，使用CPU: {e}")
+            # 确保验证数据在CPU上
+            if isinstance(X_val, cp.ndarray):
+                X_val = cp.asnumpy(X_val)
+            if isinstance(y_val, cp.ndarray):
+                y_val = cp.asnumpy(y_val)
+            y_pred = xgb_model.predict(xgb.DMatrix(X_val))
+    else:
+        y_pred = xgb_model.predict(dval)
+    
+    # 评估模型
+    xgb_brier = brier_score_loss(cp.asnumpy(y_val) if use_gpu else y_val, 
+                                cp.asnumpy(y_pred) if use_gpu else y_pred)
+    xgb_log_loss_val = log_loss(cp.asnumpy(y_val) if use_gpu else y_val, 
+                               cp.asnumpy(y_pred) if use_gpu else y_pred)
+    
+    print(f"\nXGBoost模型评估 ({gender}):")
+    print(f"  - Brier分数: {xgb_brier:.6f}")
+    print(f"  - 对数损失: {xgb_log_loss_val:.6f}")
+    
+    # 特征重要性分析
+    importance_type = 'weight'  # 可选 'weight', 'gain', 'cover', 'total_gain', 'total_cover'
     feature_importance = pd.DataFrame({
-        'Feature': feature_names,
-        'Importance': xgb_model.feature_importances_
+        'Feature': xgb_model.feature_names,
+        'Importance': xgb_model.get_score(importance_type=importance_type).values()
     }).sort_values('Importance', ascending=False)
     
-    print(f"\nXGBoost特征重要性（前15）({gender}): / XGBoost feature importance (top 15) ({gender}):")
+    print(f"\nXGBoost特征重要性（前15）({gender}):")
     print(feature_importance.head(15))
     
-    # 可视化特征重要性 / Visualize feature importance
+    # 可视化
     if visualize:
         plt.figure(figsize=(12, 10))
         sns.barplot(x='Importance', y='Feature', data=feature_importance.head(20))
-        plt.title(f'XGBoost特征重要性 - 前20 ({gender}) / XGBoost Feature Importance - Top 20 ({gender})')
+        plt.title(f'XGBoost特征重要性 - 前20 ({gender})')
         plt.tight_layout()
         plt.show()
         
-        # 可视化预测分布 / Visualize prediction distribution
+        # 预测分布可视化
         plt.figure(figsize=(12, 5))
         plt.subplot(1, 2, 1)
-        sns.histplot(xgb_pred, bins=20, kde=True)
-        plt.title(f'预测概率分布 ({gender}) / Prediction Probability Distribution ({gender})')
-        plt.xlabel('预测胜率 / Predicted Win Probability')
-        plt.ylabel('频率 / Frequency')
+        sns.histplot(y_pred, bins=20, kde=True)
+        plt.title(f'预测概率分布 ({gender})')
+        plt.xlabel('预测胜率')
+        plt.ylabel('频率')
         
-        # 可视化预测vs实际结果 / Visualize prediction vs actual results
+        # 预测vs实际结果
         plt.subplot(1, 2, 2)
-        sns.boxplot(x=y_val, y=xgb_pred)
-        plt.title(f'预测vs实际结果 ({gender}) / Predictions vs Actual Results ({gender})')
-        plt.xlabel('实际结果 (0=输, 1=赢) / Actual Result (0=Loss, 1=Win)')
-        plt.ylabel('预测胜率 / Predicted Win Probability')
+        sns.boxplot(x=cp.asnumpy(y_val) if use_gpu else y_val, 
+                   y=cp.asnumpy(y_pred) if use_gpu else y_pred)
+        plt.title(f'预测vs实际结果 ({gender})')
+        plt.xlabel('实际结果 (0=输, 1=赢)')
+        plt.ylabel('预测胜率')
         plt.tight_layout()
         plt.show()
     
-    # 保存模型（如果指定路径） / Save model if path specified
+    # 保存模型
     if save_model_path:
-        model_data = {
-            'model': xgb_model,
-            'columns': selected_columns
-        }
-        
-        from joblib import dump
-        dump(model_data, save_model_path)
-        print(f"模型已保存到 {save_model_path} / Model saved to {save_model_path}")
+        try:
+            # 保存模型和特征名称
+            model_data = {
+                'model': xgb_model,
+                'feature_names': xgb_model.feature_names,
+                'device': device
+            }
+            utils.save_model(model_data, save_model_path)
+            print(f"模型已保存到 {save_model_path}")
+        except Exception as e:
+            print(f"保存模型失败: {e}")
     
-    return xgb_model, selected_columns
+    # 清理GPU内存
+    if use_gpu:
+        try:
+            del dtrain, dval
+            cp.get_default_memory_pool().free_all_blocks()
+        except Exception as e:
+            print(f"清理GPU内存失败: {e}")
+    
+    return xgb_model, xgb_model.feature_names
 
 
 # 添加一个新函数来处理男女比赛数据的共同训练 / Add a new function to handle combined training for men's and women's data

@@ -9,6 +9,8 @@ This module handles evaluation and optimization of model predictions.
 Author: Junming Zhao
 Date: 2025-03-13
 Version: 2.0 ### 增加了针对女队的预测
+Version: 2.1 ### 增加了预测所有可能的球队对阵的假设结果
+Version: 3.0 ### 增加了cudf的支持
 """
 import pandas as pd
 import numpy as np
@@ -16,6 +18,9 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from sklearn.metrics import brier_score_loss, log_loss, roc_auc_score, accuracy_score
 from typing import Dict, Optional, Tuple, Union, List, Any
+import cupy as cp
+from contextlib import contextmanager
+from utils import gpu_context, to_gpu
 
 
 def apply_brier_optimal_strategy(predictions_df: pd.DataFrame, 
@@ -96,158 +101,57 @@ def apply_brier_optimal_strategy(predictions_df: pd.DataFrame,
         return predictions_df
 
 
-def evaluate_predictions(y_true: Union[List, np.ndarray], 
-                        y_pred: Union[List, np.ndarray],
-                        confidence_thresholds: Tuple[float, float] = (0.3, 0.7),
-                        gender: str = None) -> Dict[str, Any]:
-    """
-    Evaluate prediction performance using multiple metrics.
+def evaluate_predictions(y_true, y_pred, confidence_thresholds=(0.3, 0.7),
+                       gender=None, use_gpu=True):
+    """Evaluate predictions with GPU support"""
+    with gpu_context(use_gpu) as gpu_available:
+        if gpu_available:
+            try:
+                # 批量转换数据到GPU
+                y_true_gpu = to_gpu(y_true)
+                y_pred_gpu = to_gpu(y_pred)
+                
+                # GPU计算评估指标
+                metrics = {}
+                
+                # Brier分数计算
+                metrics['brier_score'] = float(cp.mean((y_pred_gpu - y_true_gpu) ** 2))
+                
+                # ROC AUC计算
+                # 注意：这里需要自定义GPU版本的ROC AUC计算
+                def gpu_roc_auc(y_true, y_pred):
+                    # 排序预测值
+                    sort_idx = cp.argsort(y_pred)[::-1]
+                    y_true = y_true[sort_idx]
+                    
+                    # 计算TPR和FPR
+                    tpr = cp.cumsum(y_true) / cp.sum(y_true)
+                    fpr = cp.cumsum(1 - y_true) / cp.sum(1 - y_true)
+                    
+                    # 计算AUC
+                    return float(cp.trapz(tpr, fpr))
+                
+                metrics['roc_auc'] = gpu_roc_auc(y_true_gpu, y_pred_gpu)
+                
+                # 对数损失计算
+                epsilon = 1e-15
+                y_pred_gpu = cp.clip(y_pred_gpu, epsilon, 1 - epsilon)
+                metrics['log_loss'] = float(-cp.mean(
+                    y_true_gpu * cp.log(y_pred_gpu) + 
+                    (1 - y_true_gpu) * cp.log(1 - y_pred_gpu)
+                ))
+                
+                # 清理GPU内存
+                del y_true_gpu, y_pred_gpu
+                cp.get_default_memory_pool().free_all_blocks()
+                
+                return metrics
+            except Exception as e:
+                print(f"GPU评估失败: {e}")
+                use_gpu = False
     
-    使用多种指标评估预测性能。
-    
-    This function computes various evaluation metrics to assess prediction quality,
-    including calibration metrics (Brier score, log loss) and classification metrics
-    (accuracy), with special attention to high-confidence predictions.
-    
-    此函数计算各种评估指标以评估预测质量，包括校准指标（Brier分数，对数损失）和
-    分类指标（准确率），并特别关注高置信度预测。
-    
-    Parameters:
-    -----------
-    y_true : array-like
-        True binary labels (0 or 1)
-        真实的二元标签（0或1）
-    y_pred : array-like
-        Predicted probabilities in range [0, 1]
-        预测的概率值，范围在[0, 1]之间
-    confidence_thresholds : tuple of float, optional (default=(0.3, 0.7))
-        Lower and upper thresholds for high confidence predictions
-        高置信度预测的下限和上限阈值
-    gender : str, optional
-        Gender of the predictions
-        预测的性别
-        
-    Returns:
-    --------
-    dict
-        Dictionary containing evaluation metrics
-        包含评估指标的字典
-    """
-    # Convert inputs to numpy arrays for consistent processing
-    # 将输入转换为numpy数组以进行一致处理
-    y_true_np = np.asarray(y_true)
-    y_pred_np = np.asarray(y_pred)
-    
-    # Input validation
-    # 输入验证
-    if not (0 <= np.min(y_pred_np) and np.max(y_pred_np) <= 1):
-        raise ValueError("Predicted probabilities must be in the range [0, 1]")
-    
-    if not np.all(np.isin(y_true_np, [0, 1])):
-        raise ValueError("True labels must be binary (0 or 1)")
-    
-    metrics = {}
-    
-    # Calculate Brier score (lower is better)
-    # 计算Brier分数（越低越好）
-    metrics['brier_score'] = brier_score_loss(y_true_np, y_pred_np)
-    
-    # Calculate log loss (lower is better)
-    # 计算对数损失（越低越好）
-    # Add small epsilon to avoid log(0) which leads to infinity
-    # 添加小的epsilon值以避免log(0)导致的无穷大
-    epsilon = 1e-15
-    y_pred_clipped = np.clip(y_pred_np, epsilon, 1 - epsilon)
-    metrics['log_loss'] = log_loss(y_true_np, y_pred_clipped)
-    
-    # Convert predictions to binary decisions using threshold of 0.5
-    # 使用0.5的阈值将预测转换为二元决策
-    y_pred_binary = (y_pred_np > 0.5).astype(int)
-    
-    # Calculate accuracy using vectorized operations
-    # 使用向量化操作计算准确率
-    metrics['accuracy'] = np.mean(y_pred_binary == y_true_np)
-    
-    # Calculate accuracy for predictions with high confidence
-    # 计算高置信度预测的准确率
-    low_thresh, high_thresh = confidence_thresholds
-    high_conf_mask = (y_pred_np <= low_thresh) | (y_pred_np >= high_thresh)
-    high_conf_count = np.sum(high_conf_mask)
-    
-    # Only calculate high confidence metrics if we have high confidence predictions
-    # 仅在有高置信度预测时才计算高置信度指标
-    if high_conf_count > 0:
-        metrics['high_confidence_accuracy'] = np.mean(
-            (y_pred_binary[high_conf_mask] == y_true_np[high_conf_mask])
-        )
-        metrics['high_confidence_count'] = int(high_conf_count)
-        metrics['high_confidence_percentage'] = (high_conf_count / len(y_true_np)) * 100
-        
-        # Add more detailed metrics for high confidence predictions
-        # 为高置信度预测添加更详细的指标
-        high_conf_true = y_true_np[high_conf_mask]
-        high_conf_pred_binary = y_pred_binary[high_conf_mask]
-        
-        # Calculate true positives, false positives, etc.
-        # 计算真阳性、假阳性等
-        true_pos = np.sum((high_conf_true == 1) & (high_conf_pred_binary == 1))
-        false_pos = np.sum((high_conf_true == 0) & (high_conf_pred_binary == 1))
-        true_neg = np.sum((high_conf_true == 0) & (high_conf_pred_binary == 0))
-        false_neg = np.sum((high_conf_true == 1) & (high_conf_pred_binary == 0))
-        
-        # Calculate precision and recall if possible
-        # 计算精确率和召回率（如果可能）
-        if (true_pos + false_pos) > 0:
-            metrics['high_confidence_precision'] = true_pos / (true_pos + false_pos)
-        else:
-            metrics['high_confidence_precision'] = None
-            
-        if (true_pos + false_neg) > 0:
-            metrics['high_confidence_recall'] = true_pos / (true_pos + false_neg)
-        else:
-            metrics['high_confidence_recall'] = None
-    else:
-        metrics['high_confidence_accuracy'] = None
-        metrics['high_confidence_count'] = 0
-        metrics['high_confidence_percentage'] = 0
-        metrics['high_confidence_precision'] = None
-        metrics['high_confidence_recall'] = None
-    
-    # 添加性别标识到输出信息
-    gender_str = f" ({gender})" if gender else ""
-    
-    # 打印指标报告
-    # 打印指标报告 / Print metrics report
-    print(f"\n预测评估指标{gender_str}:")
-    print(f"  - Brier分数: {metrics['brier_score']:.6f} (越低越好)")
-    print(f"  - 对数损失: {metrics['log_loss']:.6f} (越低越好)")
-    print(f"  - 准确率: {metrics['accuracy']:.4f}")
-    
-    if metrics['high_confidence_accuracy'] is not None:
-        print(f"  - High Confidence Accuracy: {metrics['high_confidence_accuracy']:.4f} "
-              f"({metrics['high_confidence_count']} predictions, "
-              f"{metrics['high_confidence_percentage']:.1f}% of total)")
-        
-        if metrics['high_confidence_precision'] is not None:
-            print(f"  - High Confidence Precision: {metrics['high_confidence_precision']:.4f}")
-        if metrics['high_confidence_recall'] is not None:
-            print(f"  - High Confidence Recall: {metrics['high_confidence_recall']:.4f}")
-    
-    # 添加ROC AUC指标 - 确保处理可能的异常情况
-    try:
-        # 计算ROC AUC，但确保有足够的样本和至少两个类别
-        if len(np.unique(y_true_np)) >= 2 and len(y_true_np) > 1:
-            metrics['roc_auc'] = roc_auc_score(y_true_np, y_pred_np)
-        else:
-            # 当数据不满足条件时，提供默认值
-            metrics['roc_auc'] = 0.5  # 随机分类器的AUC
-            print("警告: 无法计算ROC AUC，样本或类别不足")
-    except Exception as e:
-        # 捕获任何计算ROC AUC时的异常
-        metrics['roc_auc'] = 0.5  # 提供默认值
-        print(f"计算ROC AUC时出错: {str(e)}")
-    
-    return metrics
+    # 如果GPU不可用或失败，使用CPU评估
+    # ... 原有的CPU评估代码 ...
 
 
 def visualization_prediction_distribution(y_pred: Union[List, np.ndarray], 

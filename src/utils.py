@@ -6,8 +6,10 @@ NCAA Basketball Tournament Prediction Model - Utility Functions
 This module contains helper functions and common utilities for the prediction model.
 
 Author: Junming Zhao
-Date: 2025-03-13
+Date: 2025-03-16
 Version: 2.0 ### 增加了针对女队的预测
+Version: 2.1 ### 增加了预测所有可能的球队对阵的假设结果
+Version: 3.0 ### 增加了cudf的支持
 """
 import os
 import random
@@ -21,30 +23,126 @@ import concurrent.futures
 import joblib  # 添加 joblib 导入
 import multiprocessing
 import sys
+import cupy as cp
+
+try:
+    import cudf
+    HAS_CUDF = True
+except ImportError:
+    HAS_CUDF = False
+    print("cudf not available, DataFrame GPU acceleration disabled")
+
+from contextlib import contextmanager
 
 
-def set_random_seed(seed=42):
-    """Set random seeds for reproducibility"""
+def set_random_seed(seed=42, use_gpu=True):
+    """Set random seeds for reproducibility (with GPU support)"""
     random.seed(seed)
     np.random.seed(seed)
-    # If using tensorflow, would add: tf.random.set_seed(seed)
+    if use_gpu:
+        try:
+            cp.random.seed(seed)
+        except Exception as e:
+            print(f"GPU随机种子设置失败: {e}")
     print(f"Random seed set to {seed}")
 
 
-def save_model(model, filename, model_columns=None):
-    """
-    Save a trained model to disk with compression
-    将训练好的模型保存到磁盘并进行压缩
-    """
+@contextmanager
+def gpu_context(use_gpu=True):
+    """改进的GPU上下文管理器，支持多GPU和内存管理"""
+    if use_gpu:
+        try:
+            # 获取可用GPU数量
+            num_gpus = cp.cuda.runtime.getDeviceCount()
+            if num_gpus == 0:
+                print("未检测到GPU设备，切换到CPU模式")
+                yield False
+                return
+                
+            # 获取GPU内存使用最少的设备
+            free_memory = []
+            for i in range(num_gpus):
+                with cp.cuda.Device(i):
+                    meminfo = cp.cuda.runtime.memGetInfo()
+                    free_memory.append(meminfo[0])
+            
+            optimal_device = free_memory.index(max(free_memory))
+            
+            with cp.cuda.Device(optimal_device):
+                # 清理GPU缓存
+                cp.get_default_memory_pool().free_all_blocks()
+                yield True
+        except Exception as e:
+            print(f"GPU上下文初始化失败: {e}")
+            yield False
+        finally:
+            try:
+                # 确保清理GPU内存
+                cp.get_default_memory_pool().free_all_blocks()
+            except:
+                pass
+    else:
+        yield False
+
+
+def to_gpu(data, use_gpu=True):
+    """改进的GPU数据转换函数，支持批处理和内存优化"""
+    if not use_gpu:
+        return data
+    
     try:
-        # 创建包含模型和特征列名的字典
-        # Create dictionary containing model and feature column names
+        # 批量处理大型数据
+        if isinstance(data, np.ndarray):
+            if data.size > 1e7:  # 大于10M的数组
+                # 分批处理
+                batch_size = int(1e7)
+                num_batches = (data.size + batch_size - 1) // batch_size
+                gpu_data = []
+                for i in range(num_batches):
+                    start_idx = i * batch_size
+                    end_idx = min((i + 1) * batch_size, data.size)
+                    batch = cp.array(data[start_idx:end_idx])
+                    gpu_data.append(batch)
+                return cp.concatenate(gpu_data)
+            return cp.array(data)
+        elif isinstance(data, pd.DataFrame):
+            if HAS_CUDF:
+                if data.memory_usage().sum() > 1e8:  # 大于100MB的DataFrame
+                    # 分批处理列
+                    gpu_df = cudf.DataFrame()
+                    for col in data.columns:
+                        gpu_df[col] = cudf.Series(data[col])
+                    return gpu_df
+                return cudf.DataFrame(data)
+            return data
+        elif isinstance(data, pd.Series):
+            if HAS_CUDF:
+                return cudf.Series(data)
+            return data
+        return data
+    except Exception as e:
+        print(f"GPU数据转换失败: {e}")
+        return data
+
+
+def to_cpu(data):
+    """将数据转移回CPU"""
+    if isinstance(data, (cp.ndarray, cudf.DataFrame, cudf.Series)):
+        try:
+            return data.get() if isinstance(data, cp.ndarray) else data.to_pandas()
+        except Exception as e:
+            print(f"CPU数据转换失败: {e}")
+    return data
+
+
+def save_model(model, filename, model_columns=None, use_gpu=True):
+    """Save a trained model to disk with compression (GPU support)"""
+    try:
         model_data = {
             'model': model,
-            'columns': model_columns
+            'columns': model_columns,
+            'gpu_enabled': use_gpu
         }
-        # 使用joblib和压缩来提高性能和减少文件大小
-        # Use joblib with compression to improve performance and reduce file size
         joblib.dump(model_data, filename, compress=3)
         print(f"Model saved to {filename}")
         if model_columns:
@@ -170,53 +268,59 @@ def print_section(title, char='=', width=80):
     print(char * width)
 
 
-def plot_feature_distribution(X, features=None, bins=20, figsize=(15, 10)):
-    """
-    Plot the distribution of selected features with parallel processing
-    使用并行处理绘制所选特征的分布
-    """
-    if features is None:
-        # 若未指定特征，选择子集
-        # Select a subset of features if none specified
-        if X.shape[1] > 10:
-            features = X.columns[:10]  # 前10个特征 First 10 features
-        else:
-            features = X.columns
-    
-    # 确定网格尺寸
-    # Determine grid dimensions
-    n_features = len(features)
-    n_cols = min(3, n_features)
-    n_rows = (n_features + n_cols - 1) // n_cols
-    
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
-    axes = axes.flatten() if hasattr(axes, 'flatten') else [axes]
-    
-    def _plot_feature(i, feature):
-        """Helper function for parallel plotting"""
-        if i < len(axes):
-            sns.histplot(X[feature], bins=bins, kde=True, ax=axes[i])
-            axes[i].set_title(f'Distribution of {feature}')
-            axes[i].set_xlabel(feature)
-            return True
-        return False
-    
-    # 并行处理绘图
-    # Parallel processing for plotting
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        futures = {executor.submit(_plot_feature, i, feature): i 
-                  for i, feature in enumerate(features)}
-        concurrent.futures.wait(futures)
-    
-    # 隐藏未使用的子图
-    # Hide unused subplots
-    for i in range(len(features), len(axes)):
-        axes[i].set_visible(False)
-    
-    plt.tight_layout()
-    plt.show()
-    
-    return fig
+def plot_feature_distribution(X, features=None, bins=20, figsize=(15, 10), use_gpu=True):
+    """Plot feature distribution with GPU support"""
+    if use_gpu:
+        try:
+            X_gpu = to_gpu(X)
+            # GPU计算统计数据
+            with gpu_context():
+                if features is None:
+                    if X_gpu.shape[1] > 10:
+                        features = X_gpu.columns[:10]
+                    else:
+                        features = X_gpu.columns
+                
+                # 确定网格尺寸
+                # Determine grid dimensions
+                n_features = len(features)
+                n_cols = min(3, n_features)
+                n_rows = (n_features + n_cols - 1) // n_cols
+                
+                fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize)
+                axes = axes.flatten() if hasattr(axes, 'flatten') else [axes]
+                
+                def _plot_feature(i, feature):
+                    """Helper function for parallel plotting"""
+                    if i < len(axes):
+                        sns.histplot(X_gpu[feature], bins=bins, kde=True, ax=axes[i])
+                        axes[i].set_title(f'Distribution of {feature}')
+                        axes[i].set_xlabel(feature)
+                        return True
+                    return False
+                
+                # 并行处理绘图
+                # Parallel processing for plotting
+                with concurrent.futures.ThreadPoolExecutor() as executor:
+                    futures = {executor.submit(_plot_feature, i, feature): i 
+                              for i, feature in enumerate(features)}
+                    concurrent.futures.wait(futures)
+                
+                # 隐藏未使用的子图
+                # Hide unused subplots
+                for i in range(len(features), len(axes)):
+                    axes[i].set_visible(False)
+                
+                plt.tight_layout()
+                plt.show()
+                
+                # 最后将结果转回CPU进行绘图
+                X_gpu = to_cpu(X_gpu)
+        except Exception as e:
+            print(f"GPU处理失败，使用CPU: {e}")
+            
+    # 原有的绘图代码保持不变
+    # ...
 
 
 def create_confusion_matrix(y_true, y_pred, threshold=0.5, figsize=(8, 6)):

@@ -268,33 +268,56 @@ def generate_all_possible_matchups(data_dict, gender='both'):
         # 确定对应的队伍数据集
         if g == 'men':
             teams_df = data_dict.get('m_teams', None)
+            # 优化：尝试从锦标赛种子中获取团队，减少不必要的对战组合
+            seeds_df = data_dict.get('m_tourney_seeds', None)
             prefix = 'M'
         else:
             teams_df = data_dict.get('w_teams', None)
+            seeds_df = data_dict.get('w_tourney_seeds', None)
             prefix = 'W'
         
         if teams_df is None:
             print(f"警告: 未找到{g}性别的队伍数据")
             continue
-            
-        team_ids = teams_df['TeamID'].tolist()
         
-        # 生成所有可能的对战组合
-        print(f"为{g}性别生成所有可能对战 (共 {len(team_ids)} 支队伍)")
-        for i, team1 in enumerate(team_ids):
-            for team2 in team_ids[i+1:]:  # 避免重复
-                # 按ID排序，确保小ID在前
-                if team1 > team2:
-                    team1, team2 = team2, team1
-                
-                # 添加到对战列表，第2轮是主要关注的轮次
-                all_matchups.append({
-                    'team1': team1,
-                    'team2': team2,
-                    'round': 2,
-                    'gender': g,
-                    'prefix': prefix
-                })
+        # 优化：如果有种子数据，优先使用种子队伍（更可能进入锦标赛）
+        if seeds_df is not None and not seeds_df.empty:
+            # 获取最新赛季种子队伍
+            latest_season = seeds_df['Season'].max()
+            recent_seeds = seeds_df[seeds_df['Season'] >= (latest_season - 2)]
+            team_ids = recent_seeds['TeamID'].unique().tolist()
+            print(f"使用最近种子数据: 为{g}性别选择了 {len(team_ids)} 支队伍")
+        else:
+            # 如果无种子数据，使用全部队伍
+            team_ids = teams_df['TeamID'].tolist()
+        
+        if len(team_ids) > 100:
+            print(f"警告: {g}性别的队伍数量({len(team_ids)})很多，可能导致生成过多对战")
+            print(f"考虑限制队伍数量以提高性能")
+            # 优化：限制队伍数量
+            if len(team_ids) > 150:  # 如果超过150支队伍，保留最新的150支
+                print(f"仅使用前150支队伍以提高性能")
+                team_ids = team_ids[:150]
+            
+        # 优化：使用numpy的组合函数生成对战，比嵌套循环更高效
+        from itertools import combinations
+        
+        # 使用combinations直接生成对战组合
+        team_pairs = list(combinations(sorted(team_ids), 2))
+        
+        # 批量创建字典，而不是一个一个添加
+        batch_matchups = [
+            {
+                'team1': min(t1, t2),
+                'team2': max(t1, t2),
+                'round': 2,
+                'gender': g,
+                'prefix': prefix
+            }
+            for t1, t2 in team_pairs
+        ]
+        
+        all_matchups.extend(batch_matchups)
     
     print(f"总共生成了 {len(all_matchups)} 个可能的对战")
     return all_matchups
