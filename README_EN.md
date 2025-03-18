@@ -1,21 +1,27 @@
 # NCAA Basketball Tournament Prediction System
 
-[English](README_EN.md) | [中文](README_CN.md)
+[English](README_EN.md) | [中文](README_CN.md) | [日本語](README_JP.md)
 
 ## Introduction
 
-The NCAA Basketball Tournament Prediction System is a comprehensive machine learning solution designed to predict the outcomes of NCAA basketball tournament games with high accuracy. This system implements a sophisticated prediction pipeline that processes historical basketball data, engineers relevant features, trains optimized XGBoost models, and generates calibrated win probability predictions for tournament matchups.
+The NCAA Basketball Tournament Prediction System is a state-of-the-art machine learning solution designed to predict the outcomes of NCAA basketball tournament games with high accuracy. This system implements a sophisticated prediction pipeline that processes historical basketball data, engineers relevant features, trains optimized XGBoost models, and generates calibrated win probability predictions for tournament matchups.
 
 This system is specifically designed for the [March Machine Learning Mania 2025](https://www.kaggle.com/competitions/march-machine-learning-mania-2025) Kaggle competition, which challenges participants to predict the outcomes of the NCAA basketball tournaments.
 
-### Key Improvements in Version 2.0
+### Key Improvements in Version 5.0
 
-- **Dual-gender prediction support**: Now includes support for both men's and women's NCAA basketball tournaments
+- **GPU Acceleration**: Added CUDA support via cudf and cupy for dramatically improved performance on compatible hardware
+- **Memory Optimization**: Enhanced memory management with adaptive batch processing and precision reduction
+- **Error Resilience**: Improved validation, graceful fallbacks, and error recovery throughout the pipeline
+- **Expanded Visualization**: Comprehensive visual analytics including calibration curves and comparative gender analysis
+- **Multi-language Documentation**: Full documentation in English, Chinese, and Japanese
+
+### Previous Version Improvements
+
+- **Dual-gender prediction support**: Support for both men's and women's NCAA basketball tournaments
 - **Performance optimizations**: Improved parallel processing and vectorized operations for faster data processing
 - **Memory efficiency**: Better memory usage and caching strategies for handling large datasets
-- **Enhanced visualization**: Comprehensive visual analytics for model evaluation and prediction distributions
 - **Robust error handling**: Improved validation and error recovery throughout the pipeline
-- **Bilingual documentation**: Full documentation in both English and Chinese
 
 ## System Requirements
 
@@ -30,6 +36,7 @@ This system is specifically designed for the [March Machine Learning Mania 2025]
 - tqdm
 - psutil (for memory monitoring)
 - concurrent.futures (for parallel processing)
+- cupy and cudf (optional, for GPU acceleration)
 
 ## Installation
 
@@ -44,6 +51,41 @@ source myenv/bin/activate  # On Windows: myenv\Scripts\activate
 
 # Install dependencies
 pip install -r requirements.txt
+
+# Install GPU dependencies (optional)
+pip install cupy-cuda11x cudf-cuda11x
+```
+
+## System Architecture
+
+The system follows a modular architecture designed for flexibility, reproducibility, and performance:
+
+```
+NCAA Prediction System
+├── Data Acquisition Layer
+│   ├── Historical Game Data Loading
+│   ├── Team Information Processing
+│   └── Tournament Structure Analysis
+├── Feature Engineering Layer
+│   ├── Team Performance Statistics
+│   ├── Tournament Progression Modeling
+│   ├── Matchup History Analysis
+│   └── Seed-based Feature Generation
+├── Model Training Layer
+│   ├── Gender-specific Model Training
+│   ├── Hyperparameter Optimization
+│   ├── Cross-validation Framework
+│   └── GPU-accelerated Learning
+├── Prediction & Evaluation Layer
+│   ├── Calibration Curve Analysis
+│   ├── Brier Score Optimization
+│   ├── Prediction Distribution Analysis
+│   └── Risk-adjusted Strategy
+└── Visualization & Reporting Layer
+    ├── Interactive Performance Charts
+    ├── Gender Comparison Analytics
+    ├── Feature Importance Visualization
+    └── Prediction Confidence Analysis
 ```
 
 ## Code Structure
@@ -56,7 +98,7 @@ The project is organized into several modules, each handling a specific aspect o
 - **train_model.py**: Implements XGBoost model training with gender-specific models
 - **submission.py**: Generates tournament predictions for submission
 - **evaluate.py**: Contains evaluation metrics and visualization tools
-- **utils.py**: Provides utility functions used across the system
+- **utils.py**: Provides utility functions including GPU acceleration support
 
 ## Usage
 
@@ -77,6 +119,7 @@ python main.py --data_path ./data \
                --explore \
                --random_seed 42 \
                --n_cores 8 \
+               --use_gpu \
                --generate_predictions
 ```
 
@@ -91,6 +134,7 @@ python main.py --data_path ./data \
 - `--random_seed`: Random seed for reproducibility (default: 42)
 - `--n_cores`: Number of CPU cores for parallel processing (default: auto-detect)
 - `--use_cache`: Use cached data to speed up processing (default: False)
+- `--use_gpu`: Enable GPU acceleration for compatible operations (default: False)
 - `--xgb_trees`: Number of trees for XGBoost model (default: 500)
 - `--xgb_depth`: Maximum tree depth for XGBoost model (default: 6)
 - `--xgb_lr`: Learning rate for XGBoost model (default: 0.05)
@@ -120,11 +164,19 @@ The system expects the following CSV files in the data directory:
 
 ## Key Features
 
+### GPU Acceleration
+
+- CUDA-based acceleration via cupy and cudf libraries
+- Adaptive GPU memory management with fallback mechanisms
+- Optimized tensor operations for feature engineering and model training
+- Automatic hardware detection with graceful degradation to CPU
+
 ### Dual-Gender Prediction
 
 - Separate models trained for men's and women's tournaments
 - Gender-specific feature engineering tailored to each tournament's characteristics
 - Combined prediction outputs for comprehensive tournament coverage
+- Comparative analysis of prediction patterns between genders
 
 ### Advanced Feature Engineering
 
@@ -138,6 +190,7 @@ The system expects the following CSV files in the data directory:
 ### Performance Optimization
 
 - Multi-core parallel processing for compute-intensive operations
+- GPU acceleration for compatible operations
 - Memory caching to avoid redundant calculations
 - Vectorized operations for improved efficiency
 - Memory usage monitoring and optimization
@@ -169,6 +222,7 @@ The system implements several theoretical insights to improve prediction accurac
 - **Favorite-Longshot Bias Correction**: The system corrects for the systematic underestimation of strong teams (low seeds) and overestimation of weak teams (high seeds).
 - **Time-Aware Validation**: Validation is performed using more recent seasons to better reflect the temporal nature of basketball predictions.
 - **Gender-Specific Modeling**: Separate models capture the unique characteristics of men's and women's basketball tournaments.
+- **Calibration Theory**: Implements probability calibration techniques to ensure predicted probabilities accurately reflect true win likelihoods.
 
 ## Example Results
 
@@ -181,6 +235,31 @@ The system generates several output files:
 - Comparative analysis between men's and women's predictions
 
 ## Advanced Usage
+
+### GPU Acceleration
+
+```python
+from utils import gpu_context, to_gpu, to_cpu
+
+# Check if GPU is available
+with gpu_context(use_gpu=True) as gpu_available:
+    if gpu_available:
+        print("GPU acceleration enabled")
+        # Move data to GPU
+        X_gpu = to_gpu(X_train)
+        y_gpu = to_gpu(y_train)
+        
+        # Process on GPU
+        # ... processing steps ...
+        
+        # Move results back to CPU
+        X_processed = to_cpu(X_gpu)
+        y_processed = to_cpu(y_gpu)
+    else:
+        print("GPU not available, using CPU")
+        X_processed = X_train
+        y_processed = y_train
+```
 
 ### Training Gender-Specific Models
 
@@ -224,9 +303,9 @@ submission = create_submission(all_predictions, sample_submission, 'submission_2
 ## Performance Notes
 
 - Feature engineering is the most time-consuming part of the pipeline; use the `--use_cache` flag to reuse previously calculated features.
-- Parallel processing significantly improves performance but increases memory usage.
-- The system includes memory usage monitoring to help identify performance bottlenecks.
+- GPU acceleration significantly improves performance but requires compatible hardware and drivers.
 - For extremely large datasets, adjust the `n_cores` parameter to balance speed and memory usage.
+- The system includes automatic batch size optimization to manage memory usage effectively.
 
 ## Visualization
 
@@ -236,6 +315,7 @@ The system generates several visualizations to help understand model performance
 - Calibration curves showing predicted vs. actual win probabilities
 - Feature importance plots highlighting the most predictive factors
 - Comparison plots showing differences between men's and women's predictions
+- Memory and performance profiling charts
 
 ## References
 
@@ -243,6 +323,8 @@ The system generates several visualizations to help understand model performance
 - XGBoost: [https://xgboost.readthedocs.io/](https://xgboost.readthedocs.io/)
 - Brier Score: [https://en.wikipedia.org/wiki/Brier_score](https://en.wikipedia.org/wiki/Brier_score)
 - NCAA Tournament: [https://www.ncaa.com/march-madness](https://www.ncaa.com/march-madness)
+- RAPIDS cuDF: [https://docs.rapids.ai/api/cudf/stable/](https://docs.rapids.ai/api/cudf/stable/)
+- CuPy: [https://cupy.dev/](https://cupy.dev/)
 
 ## Author
 
