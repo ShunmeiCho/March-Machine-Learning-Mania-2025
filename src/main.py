@@ -137,11 +137,15 @@ def setup_environment(args):
     # 设置全局团队ID集合，用于ID处理
     global MENS_TEAMS_IDS, WOMENS_TEAMS_IDS
     
-    # 创建输出目录
+    # 创建输出目录（只在需要时创建）
     if args.output_path:
         ensure_directory(args.output_path)
-        ensure_directory(os.path.join(args.output_path, 'models'))
-        ensure_directory(os.path.join(args.output_path, 'predictions'))
+        # 只在需要生成预测时创建predictions目录
+        if args.generate_predictions:
+            ensure_directory(os.path.join(args.output_path, 'predictions'))
+        # 只在需要训练模型时创建models目录
+        if not args.load_models:
+            ensure_directory(os.path.join(args.output_path, 'models'))
     
     # 从数据中加载团队ID
     data_dict = load_data(args.data_path, use_cache=args.use_cache)
@@ -448,11 +452,14 @@ def main():
     save_features(features_dict['women'], 'features/women_features.pkl')
     
     # 创建可视化目录结构
-    vis_base_dir = os.path.join(args.output_path, 'visualizations')
-    ensure_directory(vis_base_dir)
-    ensure_directory(os.path.join(vis_base_dir, 'men'))
-    ensure_directory(os.path.join(vis_base_dir, 'women'))
-    ensure_directory(os.path.join(vis_base_dir, 'predictions'))
+    if args.explore or args.generate_predictions:
+        vis_base_dir = os.path.join(args.output_path, 'visualizations')
+        ensure_directory(vis_base_dir)
+        if args.explore:
+            ensure_directory(os.path.join(vis_base_dir, 'men'))
+            ensure_directory(os.path.join(vis_base_dir, 'women'))
+        if args.generate_predictions:
+            ensure_directory(os.path.join(vis_base_dir, 'predictions'))
     
     # 加载已训练的模型或训练新模型
     if args.load_models:
@@ -934,7 +941,13 @@ def main():
     if args.generate_predictions:
         print("生成2025年所有可能对阵的预测...")
         
-        # 确保正确传递模型列名
+        # 验证sample_submission的行数
+        expected_rows = 131407
+        actual_rows = len(data_dict['sample_sub'])
+        if actual_rows != expected_rows:
+            print(f"警告: sample_submission包含 {actual_rows} 行，期望 {expected_rows} 行")
+        
+        # 生成预测
         men_predictions = prepare_all_predictions(
             m_model, features_dict, data_dict, 
             model_columns=m_model_columns,

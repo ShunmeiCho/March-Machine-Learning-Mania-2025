@@ -236,14 +236,14 @@ def identify_team_gender(team_id, data_dict=None):
     return 'unknown'
 
 
-def generate_all_possible_matchups(data_dict, gender='both', max_teams=100):
+def generate_all_possible_matchups(data_dict, gender='both', max_teams=None):
     """
-    生成所有可能的队伍对阵组合，不仅限于锦标赛队伍
+    生成所有可能的队伍对阵组合，确保ID较小的队伍在前
     
     Parameters:
         data_dict (dict): 原始数据字典
         gender (str): 'men', 'women', 或 'both'
-        max_teams (int): 每类队伍的最大数量，防止组合爆炸
+        max_teams (int): 每类队伍的最大数量，现在默认为None，使用全部队伍
         
     Returns:
         list or dict: 队伍对阵列表或字典
@@ -254,21 +254,14 @@ def generate_all_possible_matchups(data_dict, gender='both', max_teams=100):
     if gender in ['men', 'both']:
         m_teams = data_dict.get('m_teams', None)
         if m_teams is not None:
-            # 获取所有队伍ID
-            all_m_teams = m_teams['TeamID'].unique().tolist()
+            # 获取所有队伍ID并排序
+            all_m_teams = sorted(m_teams['TeamID'].unique().tolist())
             
-            # 限制队伍数量，避免生成过多组合
-            if len(all_m_teams) > max_teams:
-                print(f"警告：男子队伍数量({len(all_m_teams)})超过限制({max_teams})，将随机选择{max_teams}支队伍")
-                import random
-                random.seed(42)  # 固定随机种子以确保可重复性
-                all_m_teams = random.sample(all_m_teams, max_teams)
-            
-            # 生成所有组合
+            # 生成所有组合，确保team1 < team2
             m_matchups = []
             for i, team1 in enumerate(all_m_teams):
-                for team2 in all_m_teams[i+1:]:
-                    m_matchups.append((min(team1, team2), max(team1, team2)))
+                for team2 in all_m_teams[i+1:]:  # 只取更大的ID
+                    m_matchups.append((team1, team2))
             
             print(f"生成了 {len(m_matchups)} 个男子队伍对阵组合")
             result['men'] = m_matchups
@@ -277,21 +270,14 @@ def generate_all_possible_matchups(data_dict, gender='both', max_teams=100):
     if gender in ['women', 'both']:
         w_teams = data_dict.get('w_teams', None)
         if w_teams is not None:
-            # 获取所有队伍ID
-            all_w_teams = w_teams['TeamID'].unique().tolist()
+            # 获取所有队伍ID并排序
+            all_w_teams = sorted(w_teams['TeamID'].unique().tolist())
             
-            # 限制队伍数量
-            if len(all_w_teams) > max_teams:
-                print(f"警告：女子队伍数量({len(all_w_teams)})超过限制({max_teams})，将随机选择{max_teams}支队伍")
-                import random
-                random.seed(42)
-                all_w_teams = random.sample(all_w_teams, max_teams)
-            
-            # 生成所有组合
+            # 生成所有组合，确保team1 < team2
             w_matchups = []
             for i, team1 in enumerate(all_w_teams):
-                for team2 in all_w_teams[i+1:]:
-                    w_matchups.append((min(team1, team2), max(team1, team2)))
+                for team2 in all_w_teams[i+1:]:  # 只取更大的ID
+                    w_matchups.append((team1, team2))
             
             print(f"生成了 {len(w_matchups)} 个女子队伍对阵组合")
             result['women'] = w_matchups
@@ -478,7 +464,7 @@ def prepare_all_predictions(model, features_dict, data_dict, model_columns=None,
     predictions_df['Team2'] = predictions_df['Team2'].astype(int)
     predictions_df['Pred'] = predictions_df['Pred'].astype(float)
     
-    # 修改：添加ID列 - 使用符合竞赛要求的格式，移除性别代码
+    # 修改：添加ID列 - 直接使用年份，不需要替换
     predictions_df['ID'] = predictions_df.apply(
         lambda row: f"{year}_{int(row['Team1'])}_{int(row['Team2'])}", axis=1
     )
@@ -519,56 +505,33 @@ def create_submission(predictions_df, sample_submission, data_dict=None, filenam
     pred_dict = dict(zip(predictions_df['ID'], predictions_df['Pred']))
     
     print("预测数据概览:")
+    print(f"  预测总数: {len(predictions_df)}")
     print(f"  ID格式样本: {predictions_df['ID'].iloc[0] if len(predictions_df) > 0 else 'N/A'}")
-    print(f"  预测字典大小: {len(pred_dict)}")
     print(f"  预测值范围: [{min(pred_dict.values()):.4f}, {max(pred_dict.values()):.4f}]")
     print(f"  预测值均值: {sum(pred_dict.values())/len(pred_dict):.4f}")
     
     # 显示样本ID和Pred
-    print("预测数据样本 (前5个):")
+    print("\n预测数据样本 (前5个):")
     for i, (k, v) in enumerate(list(pred_dict.items())[:5]):
         print(f"  {k}: {v:.4f}")
 
     # 显示sample_submission样本
-    print("样本提交文件 (前5行):")
+    print("\n样本提交文件 (前5行):")
     for i, id_val in enumerate(sample_submission['ID'].head(5).values):
         print(f"  {id_val}")
     
     # 创建新的提交文件，保持与样本提交文件相同的结构
     submission = sample_submission.copy()
     
-    # 修改sample_submission中的ID，将年份从2021改为2025
-    # 这是修复的关键部分
-    original_ids = submission['ID'].values
-    target_year = "2025"
-    
-    # 存储转换后的ID，用于更新submission
-    converted_ids = []
-    
-    for id_str in original_ids:
-        parts = id_str.split('_')
-        if len(parts) >= 3:
-            # 替换年份为2025
-            parts[0] = target_year
-            new_id = "_".join(parts)
-            converted_ids.append(new_id)
-        else:
-            # 保留原始ID（这种情况不应该发生）
-            converted_ids.append(id_str)
-            print(f"警告: 无法解析ID格式: {id_str}")
-    
-    # 使用转换后的ID更新submission的ID列
-    submission['ID'] = converted_ids
-    
     # 定义获取预测的函数
     def get_prediction(id_str):
-        # 直接在pred_dict中查找转换后的ID
+        # 直接在pred_dict中查找ID
         if id_str in pred_dict:
             return pred_dict[id_str]
         
         # 尝试交换team1和team2顺序
         parts = id_str.split('_')
-        if len(parts) == 3:  # 格式: 2025_team1_team2
+        if len(parts) == 3:  # 格式: YYYY_team1_team2
             try:
                 team1 = int(parts[1])
                 team2 = int(parts[2])
@@ -583,18 +546,19 @@ def create_submission(predictions_df, sample_submission, data_dict=None, filenam
                 pass
         
         # 如果找不到匹配的预测，使用中性值并添加小随机噪声
+        print(f"警告: ID {id_str} 未找到对应预测，使用默认值")
         return 0.5 + np.random.uniform(-0.05, 0.05)
     
     # 使用get_prediction函数填充Pred列
     submission['Pred'] = submission['ID'].apply(get_prediction)
     
     # 打印一些关键ID的映射，帮助调试
-    print("样本ID映射示例：")
+    print("\n样本ID映射示例：")
     for i, id_str in enumerate(submission['ID'].head(5).values):
-        print(f"  {i+1}. 原始ID: {original_ids[i]} -> 新ID: {id_str} -> 预测值: {submission['Pred'].iloc[i]:.4f}")
+        print(f"  {i+1}. ID: {id_str} -> 预测值: {submission['Pred'].iloc[i]:.4f}")
     
     # 验证提交文件
-    print(f"提交文件概览:")
+    print(f"\n提交文件概览:")
     print(f"  行数: {len(submission)}")
     print(f"  预测值范围: [{submission['Pred'].min():.4f}, {submission['Pred'].max():.4f}]")
     print(f"  预测值均值: {submission['Pred'].mean():.4f}")

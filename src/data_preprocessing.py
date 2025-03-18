@@ -131,7 +131,7 @@ def load_data(data_path, use_cache=True, cache_dir=None):
         'w_regular_detail': 'WRegularSeasonDetailedResults.csv', # 女子常规赛详细统计 (Women's regular season detailed stats)
         'm_tourney_seeds': 'MNCAATourneySeeds.csv',              # 男子锦标赛种子信息 (Men's tournament seeds)
         'w_tourney_seeds': 'WNCAATourneySeeds.csv',              # 女子锦标赛种子信息 (Women's tournament seeds)
-        'sample_sub': 'SampleSubmissionStage1.csv'               # 样本提交文件 (Sample submission file)
+        'sample_sub': 'SampleSubmissionStage2.csv'               # 样本提交文件 (Sample submission file)
     }
     
     # 验证文件存在性，避免后续错误
