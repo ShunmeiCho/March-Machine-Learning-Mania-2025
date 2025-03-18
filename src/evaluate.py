@@ -92,94 +92,42 @@ def apply_brier_optimal_strategy(predictions_df: pd.DataFrame,
 
 
 def evaluate_predictions(y_true, y_pred, confidence_thresholds=(0.3, 0.7),
-                       gender=None, use_gpu=True):
-    """评估预测结果，支持GPU加速"""
-    with gpu_context(use_gpu) as gpu_available:
-        if gpu_available:
-            try:
-                # 将数据转移到GPU
-                y_true_gpu = to_gpu(y_true)
-                y_pred_gpu = to_gpu(y_pred)
-                
-                # 计算评估指标
-                metrics = {}
-                
-                # Brier分数
-                metrics['brier_score'] = float(cp.mean((y_pred_gpu - y_true_gpu) ** 2))
-                
-                # 对数损失
-                epsilon = 1e-15
-                y_pred_clipped = cp.clip(y_pred_gpu, epsilon, 1 - epsilon)
-                metrics['log_loss'] = float(-cp.mean(
-                    y_true_gpu * cp.log(y_pred_clipped) + 
-                    (1 - y_true_gpu) * cp.log(1 - y_pred_clipped)
-                ))
-                
-                try:
-                    # 尝试使用更稳定的GPU ROC AUC实现
-                    # 排序预测值
-                    sort_indices = cp.argsort(y_pred_gpu)[::-1]
-                    sorted_y_true = y_true_gpu[sort_indices]
-                    sorted_y_pred = y_pred_gpu[sort_indices]
-                    
-                    # 去除重复的预测值，以避免计算错误
-                    unique_pred_values, unique_indices = cp.unique(sorted_y_pred, return_index=True)
-                    
-                    if len(unique_pred_values) > 1:
-                        # 计算TPR和FPR
-                        n_pos = cp.sum(y_true_gpu)
-                        n_neg = len(y_true_gpu) - n_pos
-                        
-                        if n_pos > 0 and n_neg > 0:
-                            # 计算累积TPR和FPR
-                            tpr = cp.zeros(len(unique_indices) + 1)
-                            fpr = cp.zeros(len(unique_indices) + 1)
-                            
-                            for i, idx in enumerate(unique_indices):
-                                tpr[i+1] = cp.sum(sorted_y_true[:idx+1]) / n_pos
-                                fpr[i+1] = cp.sum(1 - sorted_y_true[:idx+1]) / n_neg
-                            
-                            # 计算AUC
-                            metrics['roc_auc'] = float(cp.sum((fpr[1:] - fpr[:-1]) * (tpr[1:] + tpr[:-1])) / 2)
-                        else:
-                            # 正例或负例为0，AUC无意义
-                            metrics['roc_auc'] = 0.5
-                    else:
-                        # 所有预测值相同，AUC无意义
-                        metrics['roc_auc'] = 0.5
-                except Exception as e:
-                    print(f"GPU ROC AUC计算失败: {e}，使用sklearn计算")
-                    # 退回到CPU计算
-                    y_true_cpu = to_cpu(y_true_gpu)
-                    y_pred_cpu = to_cpu(y_pred_gpu)
-                    from sklearn.metrics import roc_auc_score
-                    metrics['roc_auc'] = roc_auc_score(y_true_cpu, y_pred_cpu)
-                
-                return metrics
-            except Exception as e:
-                print(f"GPU评估失败: {e}")
-                use_gpu = False
-            finally:
-                # 确保释放GPU内存
-                cp.get_default_memory_pool().free_all_blocks()
+                       gender=None, use_gpu=False):  # 默认关闭GPU避免问题
+    """评估预测结果，更稳健的实现"""
+    # 确保数据类型正确
+    y_true = np.array(y_true).astype(float)
+    y_pred = np.array(y_pred).astype(float)
     
-    # 如果GPU不可用或失败，使用CPU评估
-    # ... 原有的CPU评估代码 ...
+    # 检查输入数据
+    if len(y_true) != len(y_pred):
+        print(f"警告: 真实值和预测值长度不匹配 ({len(y_true)} vs {len(y_pred)})")
+        return {"brier_score": 1.0, "log_loss": 1.0, "roc_auc": 0.5}
     
-    # 需要添加完整的CPU实现:
-    metrics = {}
+    # 检查标签是否只有一个类别
+    unique_true = np.unique(y_true)
+    if len(unique_true) <= 1:
+        print(f"警告: 真实标签只有一个类别，无法计算有意义的ROC AUC")
+        roc_auc_val = 0.5  # 使用中性值
+    else:
+        # 使用CPU计算ROC AUC
+        try:
+            roc_auc_val = roc_auc_score(y_true, y_pred)
+        except Exception as e:
+            print(f"ROC AUC计算失败: {e}，使用默认值0.5")
+            roc_auc_val = 0.5
     
-    # Brier分数
-    from sklearn.metrics import brier_score_loss
-    metrics['brier_score'] = brier_score_loss(y_true, y_pred)
+    # 计算Brier分数
+    brier_val = brier_score_loss(y_true, y_pred)
     
-    # 对数损失
-    from sklearn.metrics import log_loss
-    metrics['log_loss'] = log_loss(y_true, y_pred)
+    # 计算对数损失，确保值在有效范围内
+    y_pred_clipped = np.clip(y_pred, 1e-15, 1-1e-15)
+    log_loss_val = log_loss(y_true, y_pred_clipped)
     
-    # ROC AUC
-    from sklearn.metrics import roc_auc_score
-    metrics['roc_auc'] = roc_auc_score(y_true, y_pred)
+    metrics = {
+        "brier_score": brier_val,
+        "log_loss": log_loss_val,
+        "roc_auc": roc_auc_val
+    }
     
     return metrics
 
@@ -192,152 +140,148 @@ def visualization_prediction_distribution(y_pred: Union[List, np.ndarray],
                                          key_points: List[float] = [0.3, 0.5, 0.7],
                                          title: Optional[str] = None) -> plt.Figure:
     """
-    Visualize the distribution of predictions.
-    
     可视化预测分布。
-    
-    Creates visualization of prediction probability distributions, optionally comparing
-    with true outcomes. This can help identify calibration issues or biases in the
-    prediction model.
-    
-    创建预测概率分布的可视化，可选择与真实结果进行比较。这有助于识别预测模型中的校准问题或偏差。
     
     Parameters:
     -----------
     y_pred : array-like
-        Predicted probabilities in range [0, 1]
         预测的概率值，范围在[0, 1]之间
     y_true : array-like, optional
-        True binary labels (0 or 1)
         真实的二元标签（0或1）
     save_path : str, optional
-        Path to save the visualization
         保存可视化结果的路径
     show_plot : bool, optional (default=True)
-        Whether to display the plot (set to False for batch processing)
         是否显示图形（批处理时设为False）
-    fig_size : tuple of int, optional (default=(12, 6))
-        Figure size (width, height) in inches
-        图形大小（宽度，高度），单位为英寸
-    key_points : list of float, optional (default=[0.3, 0.5, 0.7])
-        Key probability points to highlight with vertical lines
-        用垂直线突出显示的关键概率点
-    title : str, optional (default=None)
-        Title for the plot
+    fig_size : tuple, optional (default=(12, 6))
+        图形大小
+    key_points : list, optional (default=[0.3, 0.5, 0.7])
+        在可视化中显示的关键概率点
+    title : str, optional
         图表标题
         
     Returns:
     --------
     matplotlib.figure.Figure
-        The generated figure
         生成的图形对象
     """
-    # Convert inputs to numpy arrays
-    # 将输入转换为numpy数组
-    y_pred_np = np.asarray(y_pred)
+    # 确保输入不为空且类型正确
+    if y_pred is None or len(y_pred) == 0:
+        print("警告：预测数据为空，无法生成分布图")
+        # 返回空图形
+        fig = plt.figure(figsize=fig_size)
+        plt.title("无数据可显示")
+        return fig
     
-    # Input validation
-    # 输入验证
+    # 转换为numpy数组并过滤无效值
+    y_pred_np = np.asarray(y_pred)
+    valid_mask = ~np.isnan(y_pred_np)
+    y_pred_np = y_pred_np[valid_mask]  # 移除NaN值
+    
+    if len(y_pred_np) == 0:
+        print("警告：过滤NaN后预测数据为空，无法生成分布图")
+        fig = plt.figure(figsize=fig_size)
+        plt.title("过滤后无有效数据")
+        return fig
+    
+    # 输入验证 - 确保值在有效范围内
     if not (0 <= np.min(y_pred_np) and np.max(y_pred_np) <= 1):
-        raise ValueError("Predicted probabilities must be in the range [0, 1]")
+        print(f"警告：预测值不在[0,1]范围内（{np.min(y_pred_np):.4f}, {np.max(y_pred_np):.4f}），进行截断")
+        y_pred_np = np.clip(y_pred_np, 0, 1)
     
     if y_true is not None:
         y_true_np = np.asarray(y_true)
-        if not np.all(np.isin(y_true_np, [0, 1])):
-            # 如果y_true不是二元值，将其转换为None而不是抛出错误
-            # If y_true is not binary, convert it to None instead of raising an error
-            print("警告：真实标签包含非二元值(0/1)，将忽略真实标签进行可视化。")
-            print("Warning: True labels contain non-binary values (0/1), ignoring true labels for visualization.")
+        # 确保大小匹配
+        if len(y_true_np) != len(y_pred):
+            print(f"警告：真实标签和预测值长度不匹配 ({len(y_true_np)} vs {len(y_pred)})，忽略真实标签")
             y_true = None
+        else:
+            # 应用相同的NaN过滤
+            y_true_np = y_true_np[valid_mask]
+            # 验证真实值是否为二元值
+            if not np.all(np.isin(y_true_np, [0, 1])):
+                print("警告：真实标签包含非二元值(0/1)，将忽略真实标签进行可视化。")
+                y_true = None
     
-    # Create figure with specified size
     # 创建指定大小的图形
     fig = plt.figure(figsize=fig_size)
     
-    # Plot prediction distribution
     # 绘制预测分布
     ax1 = plt.subplot(1, 2 if y_true is not None else 1, 1)
     sns.histplot(y_pred_np, bins=20, kde=True, ax=ax1)
-    ax1.set_title('Prediction Distribution')
-    ax1.set_xlabel('Predicted Win Probability')
-    ax1.set_ylabel('Frequency')
+    ax1.set_title('预测分布')
+    ax1.set_xlabel('获胜预测概率')
+    ax1.set_ylabel('频率')
     
-    # Add main title if provided
-    # 如果提供了主标题，则添加
+    # 添加主标题
     if title:
         plt.suptitle(title, fontsize=16, y=1.05)
     
-    # Add vertical lines at key probability points
-    # 在关键概率点添加垂直线
-    colors = ['r', 'g', 'r']  # Default colors for 0.3, 0.5, 0.7
+    # 添加关键概率点的垂直线
+    colors = ['r', 'g', 'r']  # 默认颜色
     if len(key_points) != len(colors):
-        # Generate colors dynamically if key_points length doesn't match default colors
-        # 如果key_points长度与默认颜色不匹配，则动态生成颜色
+        # 动态生成颜色
         colors = plt.cm.tab10(np.linspace(0, 1, len(key_points)))
     
     for i, point in enumerate(key_points):
-        ax1.axvline(point, color=colors[i % len(colors)], linestyle='--', 
-                   alpha=0.5, label=f'{point}')
+        if 0 <= point <= 1:  # 确保点在有效范围内
+            ax1.axvline(point, color=colors[i % len(colors)], linestyle='--', 
+                       alpha=0.5, label=f'{point}')
     ax1.legend()
     
-    # Calculate summary statistics for the prediction distribution
-    # 计算预测分布的摘要统计信息
-    mean_pred = np.mean(y_pred_np)
-    median_pred = np.median(y_pred_np)
-    std_pred = np.std(y_pred_np)
+    # 计算摘要统计信息
+    try:
+        mean_pred = np.mean(y_pred_np)
+        median_pred = np.median(y_pred_np)
+        std_pred = np.std(y_pred_np)
+        
+        # 添加统计信息文本
+        stats_text = f"均值: {mean_pred:.3f}\n中位数: {median_pred:.3f}\n标准差: {std_pred:.3f}"
+        ax1.text(0.05, 0.95, stats_text, transform=ax1.transAxes, 
+                verticalalignment='top', bbox=dict(boxstyle='round', alpha=0.1))
+    except Exception as e:
+        print(f"计算统计信息时出错: {e}")
     
-    # Add text with summary statistics
-    # 添加包含摘要统计信息的文本
-    stats_text = f"Mean: {mean_pred:.3f}\nMedian: {median_pred:.3f}\nStd Dev: {std_pred:.3f}"
-    ax1.text(0.05, 0.95, stats_text, transform=ax1.transAxes, 
-            verticalalignment='top', bbox=dict(boxstyle='round', alpha=0.1))
-    
-    # If true values are provided, plot predictions by outcome
-    # 如果提供了真实值，则按结果绘制预测
+    # 如果提供了真实值，绘制按结果分组的预测
     if y_true is not None:
-        ax2 = plt.subplot(1, 2, 2)
-        
-        # 在上面的代码中，我们可能已经将y_true设置为None，所以需要重新获取y_true_np
-        # We might have set y_true to None above, so we need to get y_true_np again
-        y_true_np = np.asarray(y_true)
-        
-        # Create a more efficient data structure for plotting
-        # 创建更高效的数据结构用于绘图
-        # Using structured arrays directly instead of DataFrame for better performance
-        # 直接使用结构化数组而不是DataFrame以获得更好的性能
-        df = pd.DataFrame({'y_true': y_true_np, 'y_pred': y_pred_np})
-        
-        # Create boxplot of predictions by actual outcome
-        # 按实际结果创建预测的箱线图
-        sns.boxplot(x='y_true', y='y_pred', data=df, ax=ax2)
-        
-        # Add individual points on top of boxplot with reduced opacity for better visibility
-        # 在箱线图上添加单个点，降低不透明度以提高可见性
-        sns.stripplot(x='y_true', y='y_pred', data=df, 
-                     size=3, color='black', alpha=0.2, jitter=True, ax=ax2)
-        
-        ax2.set_title('Predictions by Actual Outcome')
-        ax2.set_xlabel('Actual Outcome (0=Loss, 1=Win)')
-        ax2.set_ylabel('Predicted Win Probability')
-        
-        # Calculate summary statistics by outcome
-        # 按结果计算摘要统计信息
-        for outcome in [0, 1]:
-            outcome_preds = y_pred_np[y_true_np == outcome]
-            if len(outcome_preds) > 0:
-                mean_val = np.mean(outcome_preds)
-                ax2.text(outcome, 0.02, f'Mean: {mean_val:.3f}', 
-                        ha='center', bbox=dict(boxstyle='round', alpha=0.1))
+        try:
+            ax2 = plt.subplot(1, 2, 2)
+            
+            # 创建数据框用于绘图
+            plot_data = {'y_true': y_true_np, 'y_pred': y_pred_np}
+            df = pd.DataFrame(plot_data)
+            
+            # 绘制箱线图
+            sns.boxplot(x='y_true', y='y_pred', data=df, ax=ax2)
+            
+            # 添加散点
+            sns.stripplot(x='y_true', y='y_pred', data=df, 
+                         size=3, color='black', alpha=0.2, jitter=True, ax=ax2)
+            
+            ax2.set_title('按实际结果分组的预测概率')
+            ax2.set_xlabel('实际结果 (0=输, 1=赢)')
+            ax2.set_ylabel('获胜预测概率')
+            
+            # 计算按结果分组的统计信息
+            for outcome in df['y_true'].unique():
+                outcome_preds = df[df['y_true'] == outcome]['y_pred']
+                if len(outcome_preds) > 0:
+                    mean_val = outcome_preds.mean()
+                    ax2.text(outcome, 0.02, f'均值: {mean_val:.3f}', 
+                            ha='center', bbox=dict(boxstyle='round', alpha=0.1))
+        except Exception as e:
+            print(f"绘制按结果分组的预测时出错: {e}")
     
     plt.tight_layout()
     
-    # Save figure if path is provided
-    # 如果提供了路径，则保存图形
+    # 保存图形
     if save_path:
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
+        try:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            print(f"图表已保存至 {save_path}")
+        except Exception as e:
+            print(f"保存图表时出错: {e}")
     
-    # Only show the plot if requested
-    # 仅在请求时显示图形
+    # 显示图形
     if show_plot:
         plt.show()
     

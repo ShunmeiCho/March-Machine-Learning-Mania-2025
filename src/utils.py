@@ -49,37 +49,52 @@ def set_random_seed(seed=42, use_gpu=True):
 
 @contextmanager
 def gpu_context(use_gpu=True):
-    """更高效和安全的GPU上下文管理器"""
+    """改进的GPU上下文管理器，添加更好的错误处理和回退机制"""
+    if not use_gpu:
+        try:
+            yield None
+        finally:
+            pass
+        return
+    
+    # 检查是否有可用GPU
     gpu_available = False
     try:
-        if use_gpu:
+        import cupy as cp
+        gpu_available = True
+        # 尝试获取GPU内存信息以验证可用性
+        _ = cp.cuda.runtime.memGetInfo()
+    except Exception as e:
+        print(f"GPU初始化失败: {e}，将使用CPU")
+        gpu_available = False
+    
+    if gpu_available:
+        try:
+            # 配置cupy使用合理的内存池限制
             try:
-                # 检查cupy是否可用
-                import cupy as cp
-                # 检查CUDA设备是否可用
-                num_gpus = cp.cuda.runtime.getDeviceCount()
-                if num_gpus > 0:
-                    gpu_available = True
-                    # 设置当前设备为0
-                    cp.cuda.Device(0).use()
-                    yield True
-                    return
-                else:
-                    print("找不到可用的CUDA设备，将使用CPU进行计算。")
-            except (ImportError, Exception) as e:
-                print(f"初始化GPU失败: {e}")
-                print("将使用CPU进行计算。")
-        
-        # 如果GPU不可用或失败，返回False
-        yield False
-    finally:
-        # 无论GPU是否可用，都尝试清理内存
-        if gpu_available:
+                cp.cuda.set_allocator(cp.cuda.MemoryPool(cp.cuda.malloc_managed).malloc)
+            except Exception:
+                # 如果managed memory不可用，使用标准内存池
+                cp.cuda.set_allocator(cp.cuda.MemoryPool().malloc)
+            
+            print("GPU上下文启动：使用CUDA加速")
+            yield True
+        except Exception as e:
+            print(f"GPU使用期间发生错误: {e}，切换到CPU")
+            yield False
+        finally:
             try:
-                # 清理GPU内存
+                # 释放所有未使用的内存
                 cp.get_default_memory_pool().free_all_blocks()
-            except Exception as e:
-                print(f"清理GPU内存时出错: {e}")
+                cp.get_default_pinned_memory_pool().free_all_blocks()
+            except Exception:
+                pass
+    else:
+        try:
+            print("GPU不可用，使用CPU")
+            yield False
+        finally:
+            pass
 
 
 def to_gpu(data, use_gpu=True):
@@ -88,6 +103,11 @@ def to_gpu(data, use_gpu=True):
         return data
     
     try:
+        # 检查GPU是否可用
+        with gpu_context(use_gpu) as gpu_available:
+            if not gpu_available:
+                return data
+                
         # 批量处理大型数据
         if isinstance(data, np.ndarray):
             if data.size > 1e7:  # 大于10M的数组
@@ -517,3 +537,50 @@ def memory_usage_report(obj, name=None):
                 print(f"  - {key}: {val/1024/1024:.3f} MB")
     
     return memory
+
+
+def optimize_memory(dataframe):
+    """优化DataFrame内存使用"""
+    # 遍历所有列
+    for col in dataframe.columns:
+        # 对数值列进行降精度
+        if dataframe[col].dtype == 'float64':
+            dataframe[col] = dataframe[col].astype('float32')
+        elif dataframe[col].dtype == 'int64':
+            dataframe[col] = dataframe[col].astype('int32')
+    return dataframe
+
+
+def safe_concat(dataframes, axis=0, join='inner', ignore_index=True):
+    """
+    安全地连接数据框，避免空或全NA列引起的警告
+    
+    参数:
+        dataframes (list): 要连接的DataFrame列表
+        axis (int): 连接轴，0为行连接，1为列连接
+        join (str): 连接方式，'inner'只保留共有列，'outer'保留所有列
+        ignore_index (bool): 是否重置索引
+        
+    返回:
+        pandas.DataFrame: 连接后的数据框
+    """
+    # 过滤空数据框
+    non_empty_dfs = [df for df in dataframes if not df.empty]
+    
+    if not non_empty_dfs:
+        return pd.DataFrame()  # 返回空数据框
+    
+    if len(non_empty_dfs) == 1:
+        return non_empty_dfs[0].copy()  # 只有一个非空数据框时直接返回
+    
+    # 对行连接，确保列一致
+    if axis == 0:
+        # 找出共有列
+        common_columns = set.intersection(*[set(df.columns) for df in non_empty_dfs])
+        filtered_dfs = [df[list(common_columns)].dropna(axis=1, how='all') for df in non_empty_dfs]
+    else:
+        # 列连接不需要特殊处理
+        filtered_dfs = non_empty_dfs
+    
+    # 安全连接
+    return pd.concat(filtered_dfs, axis=axis, join=join, ignore_index=ignore_index)

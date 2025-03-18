@@ -35,7 +35,7 @@ WOMENS_TEAMS_IDS = set()
 from data_preprocessing import load_data, explore_data, create_tourney_train_data, prepare_train_val_data_time_aware
 from feature_engineering import process_seeds, calculate_team_stats, create_matchup_history, calculate_progression_probabilities
 from train_model import merge_features, package_features, build_xgboost_model, train_gender_specific_models
-from submission import prepare_all_predictions, create_submission, validate_submission
+from submission import prepare_all_predictions, create_submission, validate_submission, validate_final_submission
 from evaluate import apply_brier_optimal_strategy, evaluate_predictions, visualization_prediction_distribution, calibration_curve
 from utils import set_random_seed, save_model, load_model, save_features, load_features, print_section, timer, ensure_directory
 
@@ -100,7 +100,7 @@ def parse_arguments():
 
 
 def setup_environment(args):
-    """Setup environment with GPU support"""
+    """设置环境并支持GPU"""
     # 设置随机种子
     set_random_seed(args.random_seed)
     
@@ -119,11 +119,41 @@ def setup_environment(args):
         print(f"GPU初始化失败: {e}")
         args.use_gpu = False
     
+    # 添加中文字体支持（集中配置一次）
+    try:
+        import matplotlib.font_manager as fm
+        import matplotlib.pyplot as plt
+        # 检查系统是否有中文字体
+        chinese_fonts = [f for f in fm.findSystemFonts() if 'chinese' in f.lower() or 'cjk' in f.lower() or 'noto' in f.lower()]
+        if chinese_fonts:
+            plt.rcParams['font.family'] = fm.FontProperties(fname=chinese_fonts[0]).get_name()
+        else:
+            plt.rcParams['font.sans-serif'] = ['DejaVu Sans', 'Arial Unicode MS', 'SimHei', 'Microsoft YaHei']
+            plt.rcParams['axes.unicode_minus'] = False
+        print("已配置中文字体支持 / Chinese font support configured")
+    except Exception as e:
+        print(f"配置中文字体支持时出错: {e} / Error configuring Chinese font support: {e}")
+    
+    # 设置全局团队ID集合，用于ID处理
+    global MENS_TEAMS_IDS, WOMENS_TEAMS_IDS
+    
     # 创建输出目录
     if args.output_path:
         ensure_directory(args.output_path)
         ensure_directory(os.path.join(args.output_path, 'models'))
         ensure_directory(os.path.join(args.output_path, 'predictions'))
+    
+    # 从数据中加载团队ID
+    data_dict = load_data(args.data_path, use_cache=args.use_cache)
+    if data_dict:
+        MENS_TEAMS_IDS = set(data_dict['m_teams']['TeamID'].unique())
+        WOMENS_TEAMS_IDS = set(data_dict['w_teams']['TeamID'].unique())
+        print(f"加载了 {len(MENS_TEAMS_IDS)} 支男队和 {len(WOMENS_TEAMS_IDS)} 支女队的ID")
+    else:
+        # 默认值防止程序崩溃
+        MENS_TEAMS_IDS = set()
+        WOMENS_TEAMS_IDS = set()
+        print("警告：无法加载团队ID集合")
     
     # 设置CPU核心数
     if args.n_cores == -1:
@@ -246,25 +276,34 @@ def process_features_parallel(data_dict, train_start_year, train_end_year, n_cor
 
 def create_matchup_history_for_season(season, regular_season, tourney_results):
     """
-    为单个赛季创建对战历史
-    Create matchup history for a single season
-    
-    Args:
-        season: 赛季年份 (Season year)
-        regular_season: 常规赛数据 (Regular season data)
-        tourney_results: 锦标赛结果数据 (Tournament results data)
-        
-    Returns:
-        DataFrame: 该赛季的对战历史 (Matchup history for the season)
+    为特定赛季创建对战历史特征
+    Create matchup history features for a specific season
     """
-    # 筛选出当前赛季的数据
-    # Filter data for current season
+    # 过滤当前赛季的数据
     season_regular = regular_season[regular_season['Season'] == season]
     season_tourney = tourney_results[tourney_results['Season'] == season]
     
-    # 合并常规赛和锦标赛结果
-    # Merge regular season and tournament results
-    all_games = pd.concat([season_regular, season_tourney])
+    # 检查数据框是否为空，避免连接空的DataFrame
+    if season_regular.empty or season_tourney.empty:
+        if season_regular.empty:
+            all_games = season_tourney.copy()
+        else:
+            all_games = season_regular.copy()
+    else:
+        # 确保两个DataFrame有相同的列结构
+        common_columns = list(set(season_regular.columns) & set(season_tourney.columns))
+        
+        # 过滤全是NA的列
+        season_regular_filtered = season_regular[common_columns].dropna(axis=1, how='all')
+        season_tourney_filtered = season_tourney[common_columns].dropna(axis=1, how='all')
+        
+        # 使用明确的参数进行连接
+        all_games = pd.concat(
+            [season_regular_filtered, season_tourney_filtered], 
+            axis=0,
+            join='inner',  # 只保留共有列
+            ignore_index=True  # 重置索引
+        )
     
     # 为每个对战创建唯一键
     # Create unique key for each matchup
@@ -366,11 +405,6 @@ def main():
     
     # 加载数据
     data_dict = load_data(args.data_path, use_cache=args.use_cache)
-    
-    # 设置全局变量供其他模块使用
-    global MENS_TEAMS_IDS, WOMENS_TEAMS_IDS
-    MENS_TEAMS_IDS = set(data_dict['m_teams']['TeamID'].values)
-    WOMENS_TEAMS_IDS = set(data_dict['w_teams']['TeamID'].values)
     
     # 打印数据基本信息
     m_teams_count = data_dict['m_teams'].shape[0]
@@ -926,30 +960,36 @@ def main():
         
         # 男子预测分布可视化
         m_pred_probs = men_predictions['Pred'].values
-        visualization_prediction_distribution(
-            None, 
-            m_pred_probs, 
-            title='Men\'s Predictions Distribution',
-            save_path=os.path.join(vis_dir, 'men_predictions_dist.png')
-        )
+        if 'm_pred_probs' in locals() and len(m_pred_probs) > 0:
+            visualization_prediction_distribution(
+                y_pred=m_pred_probs, 
+                title='男子队预测分布',
+                save_path=os.path.join(vis_dir, 'men_predictions_dist.png')
+            )
+        else:
+            print("警告：男子队预测数据为空或不存在，跳过可视化")
         
         # 女子预测分布可视化
         w_pred_probs = women_predictions['Pred'].values
-        visualization_prediction_distribution(
-            None, 
-            w_pred_probs, 
-            title='Women\'s Predictions Distribution',
-            save_path=os.path.join(vis_dir, 'women_predictions_dist.png')
-        )
+        if 'w_pred_probs' in locals() and len(w_pred_probs) > 0:
+            visualization_prediction_distribution(
+                y_pred=w_pred_probs, 
+                title='女子队预测分布',
+                save_path=os.path.join(vis_dir, 'women_predictions_dist.png')
+            )
+        else:
+            print("警告：女子队预测数据为空或不存在，跳过可视化")
         
         # 所有预测的整体分布
         all_pred_probs = all_predictions['Pred'].values
-        visualization_prediction_distribution(
-            None, 
-            all_pred_probs, 
-            title='All Predictions Distribution',
-            save_path=os.path.join(vis_dir, 'all_predictions_dist.png')
-        )
+        if 'all_pred_probs' in locals() and len(all_pred_probs) > 0:
+            visualization_prediction_distribution(
+                y_pred=all_pred_probs, 
+                title='所有预测分布',
+                save_path=os.path.join(vis_dir, 'all_predictions_dist.png')
+            )
+        else:
+            print("警告：所有预测数据为空或不存在，跳过可视化")
         
         # 分析预测偏差，查看男队和女队预测是否有系统性差异
         print_section("分析预测偏差")
@@ -975,6 +1015,7 @@ def main():
         print(f"创建提交文件: {submission_file}")
         submission = create_submission(
             all_predictions, data_dict['sample_sub'], 
+            data_dict=data_dict,
             filename=os.path.join(args.output_path, submission_file)
         )
         
@@ -986,6 +1027,15 @@ def main():
             print("✓ 提交文件验证成功！符合2025比赛要求")
         else:
             print("⚠ 提交文件验证失败！请检查")
+        
+        # 添加最终验证
+        full_path = os.path.join(args.output_path, submission_file)
+        is_final_valid = validate_final_submission(full_path)
+        
+        if is_final_valid:
+            print("✓ 最终提交文件格式验证成功！")
+        else:
+            print("⚠ 最终提交文件格式验证失败！请检查ID格式和预测值范围")
     
     print("处理完成！所有可视化结果已保存至 {}".format(vis_base_dir))
 

@@ -27,6 +27,54 @@ import bisect
 from sklearn.model_selection import train_test_split
 
 
+def optimize_memory_usage(df):
+    """
+    优化DataFrame的内存使用，根据每列的数据特性降低内存占用
+    
+    参数:
+        df (pandas.DataFrame): 要优化的数据框
+        
+    返回:
+        pandas.DataFrame: 优化后的数据框
+    """
+    # 遍历所有列
+    for col in df.columns:
+        # 优化整数类型
+        if pd.api.types.is_integer_dtype(df[col]):
+            # 确定最小可用整数类型
+            col_min = df[col].min()
+            col_max = df[col].max()
+            
+            # 根据范围选择合适的整数类型
+            if col_min >= 0:
+                if col_max < 2**8:
+                    df[col] = df[col].astype('uint8')
+                elif col_max < 2**16:
+                    df[col] = df[col].astype('uint16')
+                elif col_max < 2**32:
+                    df[col] = df[col].astype('uint32')
+            else:
+                if col_min > -2**7 and col_max < 2**7:
+                    df[col] = df[col].astype('int8')
+                elif col_min > -2**15 and col_max < 2**15:
+                    df[col] = df[col].astype('int16')
+                elif col_min > -2**31 and col_max < 2**31:
+                    df[col] = df[col].astype('int32')
+        
+        # 优化浮点类型
+        elif pd.api.types.is_float_dtype(df[col]):
+            # 尝试使用float32而不是float64
+            df[col] = df[col].astype('float32')
+        
+        # 优化对象/字符串类型
+        elif pd.api.types.is_object_dtype(df[col]):
+            # 如果是字符串列，检查是否可以使用类别类型
+            if df[col].nunique() / len(df) < 0.5:  # 少于50%的唯一值
+                df[col] = df[col].astype('category')
+    
+    return df
+
+
 def load_data(data_path, use_cache=True, cache_dir=None):
     """
     加载NCAA篮球比赛数据集中的必要文件，并支持缓存功能
@@ -98,6 +146,11 @@ def load_data(data_path, use_cache=True, cache_dir=None):
     data_dict = {key: pd.read_csv(os.path.join(data_path, filename)) 
                 for key, filename in files_to_load.items() 
                 if os.path.exists(os.path.join(data_path, filename))}
+    
+    # 在返回数据之前执行内存优化
+    for key in data_dict:
+        data_dict[key] = optimize_memory_usage(data_dict[key])
+        print(f"优化后 {key}: 内存使用 {data_dict[key].memory_usage().sum() / 1024**2:.2f} MB")
     
     # 保存到缓存
     # Save to cache
@@ -275,64 +328,33 @@ def create_tourney_train_data(tourney_results, start_year, end_year):
 
 
 def prepare_train_val_data_time_aware(X, y, tourney_train, test_size=0.2, 
-                                     random_state=42, use_gpu=True):
-    """Prepare train/val data with GPU support"""
-    with gpu_context(use_gpu) as gpu_available:
-        if gpu_available:
-            try:
-                # 批量转换数据到GPU以提高效率
-                batch_size = int(1e6)  # 设置合适的批量大小
-                X_batches, y_batches = [], []
-                
-                try:
-                    # 分批转换X
-                    for i in range(0, len(X), batch_size):
-                        batch = to_gpu(X[i:i+batch_size])
-                        X_batches.append(batch)
-                    X_gpu = cp.concatenate(X_batches) if len(X_batches) > 1 else X_batches[0]
-                    
-                    # 分批转换y
-                    for i in range(0, len(y), batch_size):
-                        batch = to_gpu(y[i:i+batch_size])
-                        y_batches.append(batch)
-                    y_gpu = cp.concatenate(y_batches) if len(y_batches) > 1 else y_batches[0]
-                    
-                    # GPU上进行数据分割
-                    split_idx = int(len(X_gpu) * (1 - test_size))
-                    X_train = X_gpu[:split_idx]
-                    X_val = X_gpu[split_idx:]
-                    y_train = y_gpu[:split_idx]
-                    y_val = y_gpu[split_idx:]
-                    
-                    result = to_cpu(X_train), to_cpu(X_val), to_cpu(y_train), to_cpu(y_val)
-                finally:
-                    # 确保清理临时GPU内存，不管是否成功
-                    del X_batches, y_batches
-                    if 'X_gpu' in locals(): del X_gpu
-                    if 'y_gpu' in locals(): del y_gpu
-                    cp.get_default_memory_pool().free_all_blocks()
-                
-                return result
-            except Exception as e:
-                print(f"GPU处理失败: {e}")
-                use_gpu = False
-                cp.get_default_memory_pool().free_all_blocks()
-    
-    # 如果GPU不可用或失败，使用CPU处理
-    # 确保X和y是numpy数组
+                                     random_state=42, use_gpu=False):
+    """准备训练/验证数据，改进数据类型处理"""
+    # 确保数据类型正确
     X_np = np.array(X) if not isinstance(X, np.ndarray) else X
     y_np = np.array(y) if not isinstance(y, np.ndarray) else y
     
-    # 获取比赛季节信息，用于分层分割
-    seasons = tourney_train['Season'].values
+    # 确保y是二值的
+    unique_values = np.unique(y_np)
+    if len(unique_values) > 2 or not np.all(np.isin(unique_values, [0, 1])):
+        print("警告: y包含非二值数据，转换为二值")
+        y_np = (y_np > 0.5).astype(int)  # 将大于0.5的值转为1，其余为0
     
-    # 进行分层分割，保持每个季节的比例
-    X_train, X_val, y_train, y_val = train_test_split(
-        X_np, y_np, 
-        test_size=test_size, 
-        random_state=random_state,
-        stratify=seasons
-    )
+    # 使用分层分割
+    try:
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_np, y_np, 
+            test_size=test_size, 
+            random_state=random_state,
+            stratify=tourney_train['Season'].values
+        )
+    except Exception as e:
+        print(f"分层分割失败: {e}，使用随机分割")
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_np, y_np, 
+            test_size=test_size, 
+            random_state=random_state
+        )
     
     return X_train, X_val, y_train, y_val
 

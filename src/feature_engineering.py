@@ -174,7 +174,17 @@ def create_matchup_history(regular_season, tourney_results, start_year, end_year
     """
     # 合并常规赛和锦标赛结果
     # Merge regular season and tournament results
-    all_games = pd.concat([regular_season, tourney_results])
+    common_columns = list(set(regular_season.columns) & set(tourney_results.columns))
+    regular_season_filtered = regular_season[common_columns].dropna(axis=1, how='all')
+    tourney_results_filtered = tourney_results[common_columns].dropna(axis=1, how='all')
+    
+    all_games = pd.concat(
+        [regular_season_filtered, tourney_results_filtered], 
+        axis=0,
+        join='inner',
+        ignore_index=True
+    )
+    
     all_games = all_games[(all_games['Season'] >= start_year) & 
                           (all_games['Season'] <= end_year)]
     
@@ -386,3 +396,129 @@ def convert_progression_to_matchup(team1_prog, team2_prog, round_num):
             team1_matchup_prob = 1 / (1 + boosted_ratio)
     
     return team1_matchup_prob
+
+
+def build_matchup_features(team1, team2, features_dict, target_year=2025, round_num=2, gender='men', data_dict=None):
+    """
+    为两支队伍的对阵创建特征，优化类型处理与性能
+    """
+    # 错误处理：确保输入有效
+    if team1 is None or team2 is None:
+        print(f"警告：队伍ID无效 - team1: {team1}, team2: {team2}")
+        return None
+    
+    try:
+        # 确保团队ID为整数
+        team1 = int(team1)
+        team2 = int(team2)
+    except (ValueError, TypeError) as e:
+        print(f"错误：队伍ID转换失败 - {e}")
+        return None
+    
+    # 确保team1 < team2
+    if team1 > team2:
+        team1, team2 = team2, team1  # 交换以保持一致性
+    
+    # 提取队伍统计数据，避免重复访问字典
+    team_stats = features_dict.get('team_stats', {}).get(target_year, {})
+    seed_features = features_dict.get('seed_features', {}).get(target_year, {})
+    matchup_history = features_dict.get('matchup_history', {}).get(target_year, {})
+    progression_probs = features_dict.get('progression_probs', {}).get(target_year, {})
+    
+    # 如果特征数据缺失，使用默认值
+    if not team_stats or team1 not in team_stats or team2 not in team_stats:
+        # 创建默认特征
+        return {
+            # 基本特征
+            'Team1': team1,
+            'Team2': team2,
+            'Round': round_num if round_num is not None else 2,  # 默认轮次
+            'Season': target_year,
+            # 统计特征（使用中位数估计）
+            'WinRate_1': 0.5,
+            'WinRate_2': 0.5,
+            'AvgScore_1': 70.0,
+            'AvgScore_2': 70.0,
+            'AvgScoreAllowed_1': 70.0,
+            'AvgScoreAllowed_2': 70.0,
+            'ScoreDiff_1': 0.0,
+            'ScoreDiff_2': 0.0,
+            'WinRateDiff': 0.0,
+            'ScoreDiffDiff': 0.0,
+            # 种子特征
+            'Seed_1': 8,  # 使用中间种子作为默认值
+            'Seed_2': 8,
+            'SeedDiff': 0,
+            # 进度特征
+            'ProgProb_1': 0.5,
+            'ProgProb_2': 0.5,
+            'ProgProbDiff': 0.0,
+        }
+    
+    # 提前获取所有需要的数据，减少字典查找
+    t1_stats = team_stats.get(team1, {})
+    t2_stats = team_stats.get(team2, {})
+    
+    # 使用单次字典查找创建所有特征，减少访问开销
+    win_rate_1 = t1_stats.get('win_rate', 0.5)
+    win_rate_2 = t2_stats.get('win_rate', 0.5)
+    avg_pts_1 = t1_stats.get('avg_points_scored', 70.0)
+    avg_pts_2 = t2_stats.get('avg_points_scored', 70.0)
+    avg_pts_allowed_1 = t1_stats.get('avg_points_allowed', 70.0)
+    avg_pts_allowed_2 = t2_stats.get('avg_points_allowed', 70.0)
+    score_diff_1 = t1_stats.get('point_diff', 0.0)
+    score_diff_2 = t2_stats.get('point_diff', 0.0)
+    
+    # 获取种子信息，使用默认值如果不存在
+    seed_1 = seed_features.get(team1, {}).get('seed_num', 8)
+    seed_2 = seed_features.get(team2, {}).get('seed_num', 8)
+    
+    # 确保种子是整数
+    try:
+        seed_1 = int(seed_1) if seed_1 is not None else 8
+        seed_2 = int(seed_2) if seed_2 is not None else 8
+    except (ValueError, TypeError):
+        seed_1, seed_2 = 8, 8
+    
+    # 获取进度概率
+    prog_1 = progression_probs.get(team1, {}).get(f'rd{round_num}_win', 0.5)
+    prog_2 = progression_probs.get(team2, {}).get(f'rd{round_num}_win', 0.5)
+    
+    # 历史对阵信息
+    matchup_key = (team1, team2)
+    history = matchup_history.get(matchup_key, {})
+    games = history.get('games', 0)
+    team1_wins = history.get('wins_team1', 0)
+    
+    # 一次性创建并返回特征字典，减少操作
+    return {
+        # 基本特征
+        'Team1': team1,
+        'Team2': team2,
+        'Round': round_num if round_num is not None else 2,
+        'Season': target_year,
+        # 团队统计特征
+        'WinRate_1': win_rate_1,
+        'WinRate_2': win_rate_2,
+        'WinRateDiff': win_rate_1 - win_rate_2,
+        'AvgScore_1': avg_pts_1,
+        'AvgScore_2': avg_pts_2,
+        'AvgScoreAllowed_1': avg_pts_allowed_1,
+        'AvgScoreAllowed_2': avg_pts_allowed_2,
+        'ScoreDiff_1': score_diff_1,
+        'ScoreDiff_2': score_diff_2,
+        'ScoreDiffDiff': score_diff_1 - score_diff_2,
+        # 种子特征
+        'Seed_1': seed_1,
+        'Seed_2': seed_2,
+        'SeedDiff': seed_1 - seed_2,
+        # 进度特征
+        'ProgProb_1': prog_1,
+        'ProgProb_2': prog_2,
+        'ProgProbDiff': prog_1 - prog_2,
+        # 历史对阵特征
+        'PreviousGames': games,
+        'Team1PrevWins': team1_wins,
+        'Team1WinPct': (team1_wins / games) if games > 0 else 0.5,
+        'AvgPointDiff': history.get('avg_point_diff', 0)
+    }

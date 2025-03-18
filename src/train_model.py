@@ -398,64 +398,43 @@ def package_features(team_stats, seed_features, matchup_history, progression_pro
 def build_xgboost_model(X_train, y_train, X_val, y_val, random_seed=42, 
                        use_early_stopping=True, param_tuning=False,
                        visualize=True, save_model_path=None, gender='men',
-                       use_gpu=True):
-    """Build XGBoost model with improved GPU support"""
+                       use_gpu=False):  # 默认关闭GPU以提高稳定性
+    """构建XGBoost模型，增强稳定性"""
     print(f"训练XGBoost模型... ({gender})")
     
-    # GPU配置优化
-    if use_gpu:
-        try:
-            # 检查CUDA是否可用
-            n_gpus = cp.cuda.runtime.getDeviceCount()
-            if n_gpus == 0:
-                raise RuntimeError("No GPU devices found")
-            
-            # 选择最佳GPU设备
-            free_memory = []
-            for i in range(n_gpus):
-                with cp.cuda.Device(i):
-                    meminfo = cp.cuda.runtime.memGetInfo()
-                    free_memory.append(meminfo[0])
-            optimal_device = free_memory.index(max(free_memory))
-            
-            # 设置XGBoost GPU参数
-            tree_method = 'hist'  # 更新为新的推荐方式
-            predictor = 'gpu_predictor'
-            device = f'cuda:{optimal_device}'  # 使用新的device参数
-            
-            # 转换数据到GPU
-            X_train = utils.to_gpu(X_train)
-            y_train = utils.to_gpu(y_train)
-            X_val = utils.to_gpu(X_val)
-            y_val = utils.to_gpu(y_val)
-            
-        except Exception as e:
-            print(f"GPU初始化失败，使用CPU: {e}")
-            use_gpu = False
-            tree_method = 'hist'
-            predictor = 'cpu_predictor'
-            device = 'cpu'
-    else:
-        tree_method = 'hist'
-        predictor = 'cpu_predictor'
-        device = 'cpu'
-    
-    # 优化的XGBoost参数
+    # 降低复杂度，增加正则化
     params = {
-        'tree_method': tree_method,
-        'predictor': predictor,
-        'device': device,  # 使用新的device参数
         'objective': 'binary:logistic',
         'eval_metric': 'logloss',
         'random_state': random_seed,
-        'learning_rate': 0.05,
-        'n_estimators': 300,
-        'max_depth': 5,
-        'min_child_weight': 3,
-        'subsample': 0.8,
-        'colsample_bytree': 0.8,
-        'gamma': 0.1
+        'learning_rate': 0.03,          # 降低学习率
+        'n_estimators': 200,            # 减少树的数量
+        'max_depth': 4,                 # 减少树的深度
+        'min_child_weight': 5,          # 增加叶节点最小样本数
+        'subsample': 0.7,               # 减少样本使用比例
+        'colsample_bytree': 0.7,        # 减少特征使用比例
+        'gamma': 0.2,                   # 增加最小损失减少值
+        'reg_alpha': 0.1,               # L1正则化
+        'reg_lambda': 0.5,              # L2正则化
     }
+    
+    # 对女子模型特别调整
+    if gender == 'women':
+        params['learning_rate'] = 0.02   # 进一步降低学习率
+        params['max_depth'] = 3          # 进一步降低深度
+        params['min_child_weight'] = 8   # 增加最小样本数
+        params['reg_lambda'] = 1.0       # 增加L2正则化
+    
+    # 处理GPU设置
+    if use_gpu:
+        try:
+            params['tree_method'] = 'gpu_hist'
+            params['gpu_id'] = 0
+        except Exception as e:
+            print(f"GPU初始化失败，使用CPU: {e}")
+            params['tree_method'] = 'hist'
+    else:
+        params['tree_method'] = 'hist'
     
     # 检查特征相关性之前确保数据类型正确
     X_train_orig = X_train
